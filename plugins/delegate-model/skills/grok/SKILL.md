@@ -26,7 +26,7 @@ Optional flags worth knowing:
 | Flag | Meaning |
 |---|---|
 | `--timeout SECS` | Overrides the default (1800s, or `DELEGATE_TIMEOUT_SECS`). |
-| `--brief-file PATH` | Read the brief from a file instead of trailing argv words, for long briefs. |
+| `--brief-file PATH` | Read the brief from a file instead of trailing argv words, for long briefs. Supplying both `--brief-file` and a trailing brief is a usage error (exit 2) — the wrapper never silently picks one and drops the other. |
 | `--extra-args "…"` | Escape hatch, appended verbatim to Grok's argv after the wrapper's own flags. |
 | `--run-dir PATH` | Use this directory for run artifacts instead of the default. |
 
@@ -100,7 +100,7 @@ The wrapper always prints one JSON object to stdout, success or failure. Read it
 | `auth_required` | Not logged in | Suggest the user run `! grok login`. |
 | `quota_exceeded` | Rate limited or over quota | Wait or ask the user how to proceed. |
 | `empty_final_message` | Grok returned nothing after the wrapper's built-in retry (and, on write, `gitStatus` was already dirty so no retry ran) | Check `gitStatus` for evidence of a completed write before assuming total failure. |
-| `parse_error` | Grok's JSON output could not be parsed | Inspect `rawLog`; do not guess at `text`. |
+| `parse_error` | Either Grok's streaming output could not be parsed at all (and the old flat-JSON fallback didn't match either), or the stream was truncated — recognizable streaming events arrived but no terminal result/error line did | Inspect `rawLog`; do not guess at `text`. For a truncated stream, check `sessionId` first — it's preserved from the `init` line and may still be usable for a follow-up `--session` run. |
 | `timeout` | Exceeded the timeout | Consider a longer `--timeout` or a narrower brief. |
 | `backend_failed` | Grok exited non-zero for another reason | Check `stderrTail`. |
 | `usage` | Bad wrapper invocation (missing `--mode`, relative `--cwd`, etc.) | Fix the invocation; this is exit code 2. |

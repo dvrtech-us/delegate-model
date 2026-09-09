@@ -12,47 +12,192 @@ if (b === 'hang') {
   return;
 }
 
+// Mock never recognizes any --session/-r value: simulate grok's real
+// pre-session "Couldn't start session" failure so the wrapper's
+// session-retry path fires (the retry omits -r and lands on `b`'s output).
+const sIdx = args.indexOf('-r');
+if (sIdx >= 0 && args[sIdx + 1]) {
+  process.stdout.write(lib.readFixture('grok-type-error.ndjson'));
+  process.exit(1);
+}
+
 if (b === 'touch_file') {
   lib.touchInCwd(args);
 }
 
+function emitFixture(name, code) {
+  const body = lib.readFixture(name);
+  process.stdout.write(body);
+  if (!body.endsWith('\n')) process.stdout.write('\n');
+  process.exit(code);
+}
+
 if (b === 'empty' || b === 'touch_file') {
   process.stdout.write(
-    JSON.stringify({
-      text: '',
-      stopReason: 'end_turn',
-      sessionId: 'mock-empty-session',
-      usage: { input_tokens: 1, output_tokens: 0 },
-      total_cost_usd: 0,
-    }) + '\n'
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-empty-session' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: '',
+        session_id: 'mock-empty-session',
+        usage: { input_tokens: 1, output_tokens: 0 },
+        total_cost_usd: 0,
+      }),
+    ].join('\n') + '\n'
   );
   process.exit(0);
 }
 
 if (b === 'quota') {
   process.stdout.write(
-    JSON.stringify({
-      text: '',
-      error: 'rate limit / quota exceeded',
-      sessionId: 'mock-quota',
-    }) + '\n'
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-quota' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        session_id: 'mock-quota',
+        errors: [{ message: 'quota exceeded (429): rate limit hit' }],
+      }),
+    ].join('\n') + '\n'
   );
   process.exit(1);
 }
 
 if (b === 'quota_in_text') {
   process.stdout.write(
-    JSON.stringify({
-      text: 'The quota and rate limit for login is fine.',
-      stopReason: 'end_turn',
-      sessionId: 'mock-quota-words',
-      usage: { input_tokens: 1, output_tokens: 10 },
-      total_cost_usd: 0,
-    }) + '\n'
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-quota-words' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'The quota and rate limit for login is fine.',
+        session_id: 'mock-quota-words',
+        usage: { input_tokens: 1, output_tokens: 10 },
+        total_cost_usd: 0,
+      }),
+    ].join('\n') + '\n'
   );
   process.exit(0);
 }
 
-process.stdout.write(lib.readFixture('grok-ok.json'));
-if (!lib.readFixture('grok-ok.json').endsWith('\n')) process.stdout.write('\n');
-process.exit(0);
+// Non-quota structured failure: is_error true, errors[], NO `result` key —
+// exercises the retry-gate fix (must not be retried as an empty success).
+if (b === 'error_result') {
+  emitFixture('grok-error-result.ndjson', 1);
+}
+
+// Same structured failure, but the process EXITS 0 — proves the retry/backend
+// gating is driven by the `failed` flag, not by exit code (F5).
+if (b === 'error_result_exit0') {
+  emitFixture('grok-error-result.ndjson', 0);
+}
+
+// is_error:true ALONE (subtype is a normal "success") must still mark failed —
+// proves that half of the OR independently of the subtype check (F5).
+if (b === 'is_error_only') {
+  process.stdout.write(
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-is-error-only' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: true,
+        result: '',
+        session_id: 'mock-is-error-only',
+        usage: { input_tokens: 1, output_tokens: 0 },
+        total_cost_usd: 0,
+      }),
+    ].join('\n') + '\n'
+  );
+  process.exit(0);
+}
+
+// subtype:"error_*" ALONE (is_error false) must still mark failed — proves
+// that half of the OR independently of the is_error check (F5).
+if (b === 'error_subtype_only') {
+  process.stdout.write(
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-error-subtype-only' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: false,
+        result: '',
+        session_id: 'mock-error-subtype-only',
+        usage: { input_tokens: 1, output_tokens: 0 },
+        total_cost_usd: 0,
+      }),
+    ].join('\n') + '\n'
+  );
+  process.exit(0);
+}
+
+// Old flat `--output-format json` shape (pre-fix CLIs, or --json-schema /
+// --extra-args overriding our --output-format flag) — exercises the fallback.
+if (b === 'legacy_json') {
+  emitFixture('grok-ok.json', 0);
+}
+
+// F1: benign stderr wording that used to false-positive as unknown-session —
+// a genuinely successful run must stay ok:true.
+if (b === 'benign_session_stderr') {
+  process.stderr.write('Warning: failed to restore session cache; recovered\n');
+  emitFixture('grok-ok.ndjson', 0);
+}
+
+// F1: a real auth failure phrased as "Couldn't start session: unauthorized
+// (401)" must classify as auth_required, NOT unknown-session.
+if (b === 'session_auth_401') {
+  process.stdout.write(JSON.stringify({ type: 'error', message: "Couldn't start session: unauthorized (401)" }) + '\n');
+  process.exit(1);
+}
+
+// F1: exercise each surviving UNKNOWN_SESSION_RE alternative independently.
+// Message text comes from MOCK_SESSION_ERROR_MSG so run.sh can loop over them.
+if (b === 'session_error_custom') {
+  const msg = process.env.MOCK_SESSION_ERROR_MSG || 'unknown session';
+  process.stdout.write(JSON.stringify({ type: 'error', message: msg }) + '\n');
+  process.exit(1);
+}
+
+// F2: a later `type:"error"` line must win over an earlier `type:"result"`
+// line — stream order decides, not a type preference.
+if (b === 'result_then_error') {
+  process.stdout.write(
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-order' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'OK',
+        session_id: 'mock-order',
+        usage: { input_tokens: 1, output_tokens: 1 },
+        total_cost_usd: 0,
+      }),
+      JSON.stringify({ type: 'error', message: 'quota exceeded (429): later error wins' }),
+    ].join('\n') + '\n'
+  );
+  process.exit(0);
+}
+
+// F3: stream cut off after the init line, before any terminal result/error
+// line — must NOT masquerade as the legacy flat-json fallback.
+if (b === 'init_only') {
+  process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-init-only' }) + '\n');
+  process.exit(0);
+}
+
+// F4: truly empty stdout (not even a newline) with an incidental stderr
+// auth-shaped warning, exit 0 — must classify as the honest parse_error, not
+// auth_required.
+if (b === 'truly_empty_auth_stderr') {
+  process.stderr.write('Warning: login cache unavailable\n');
+  process.exit(0);
+}
+
+emitFixture('grok-ok.ndjson', 0);

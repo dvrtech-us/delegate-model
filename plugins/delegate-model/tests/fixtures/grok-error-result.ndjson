@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"01c2-error-session","model":"grok-4.6-build","cwd":"/tmp"}
+{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"01c2-error-session","errors":[{"message":"Reached maximum turns (120) without completing the task."}],"usage":{"input_tokens":100,"output_tokens":0},"total_cost_usd":0}

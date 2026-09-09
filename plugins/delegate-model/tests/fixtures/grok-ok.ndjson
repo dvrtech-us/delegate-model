@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"01a083f0-1c50-7e01-af19-c746a5bb6e91","model":"grok-4.6-build","cwd":"/tmp"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Let me check that for you."}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"One moment while I confirm."}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"01a083f0-1c50-7e01-af19-c746a5bb6e91","usage":{"input_tokens":6735,"output_tokens":39},"total_cost_usd":0.00331976,"num_turns":2}
