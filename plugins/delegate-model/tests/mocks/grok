@@ -1,0 +1,58 @@
+#!/usr/bin/env node
+'use strict';
+
+const lib = require('./_lib');
+
+lib.markSpawned();
+const args = process.argv.slice(2);
+const b = lib.resolveBehavior();
+
+if (b === 'hang') {
+  lib.hang();
+  return;
+}
+
+if (b === 'touch_file') {
+  lib.touchInCwd(args);
+}
+
+if (b === 'empty' || b === 'touch_file') {
+  process.stdout.write(
+    JSON.stringify({
+      text: '',
+      stopReason: 'end_turn',
+      sessionId: 'mock-empty-session',
+      usage: { input_tokens: 1, output_tokens: 0 },
+      total_cost_usd: 0,
+    }) + '\n'
+  );
+  process.exit(0);
+}
+
+if (b === 'quota') {
+  process.stdout.write(
+    JSON.stringify({
+      text: '',
+      error: 'rate limit / quota exceeded',
+      sessionId: 'mock-quota',
+    }) + '\n'
+  );
+  process.exit(1);
+}
+
+if (b === 'quota_in_text') {
+  process.stdout.write(
+    JSON.stringify({
+      text: 'The quota and rate limit for login is fine.',
+      stopReason: 'end_turn',
+      sessionId: 'mock-quota-words',
+      usage: { input_tokens: 1, output_tokens: 10 },
+      total_cost_usd: 0,
+    }) + '\n'
+  );
+  process.exit(0);
+}
+
+process.stdout.write(lib.readFixture('grok-ok.json'));
+if (!lib.readFixture('grok-ok.json').endsWith('\n')) process.stdout.write('\n');
+process.exit(0);

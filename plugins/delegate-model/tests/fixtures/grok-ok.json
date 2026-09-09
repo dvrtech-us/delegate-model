@@ -1,0 +1,28 @@
+{
+  "text": "OK",
+  "stopReason": "end_turn",
+  "sessionId": "01a083f0-1c50-7e01-af19-c746a5bb6e91",
+  "requestId": "101a4335-f6c0-42c5-83d5-ed1131dee7ed",
+  "thought": "The user wants me to reply with exactly the word \"OK\". This is a simple request - I should just respond with \"OK\" and nothing else.",
+  "usage": {
+    "input_tokens": 6735,
+    "cache_read_input_tokens": 11648,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 39,
+    "reasoning_tokens": 34,
+    "total_tokens": 18422
+  },
+  "num_turns": 1,
+  "total_cost_usd": 0.00331976,
+  "total_cost_usd_ticks": 33197600,
+  "modelUsage": {
+    "grok-4.6-build": {
+      "inputTokens": 6735,
+      "outputTokens": 39,
+      "cacheReadInputTokens": 11648,
+      "cacheCreationInputTokens": 0,
+      "modelCalls": 1,
+      "costUSD": 0.00331976
+    }
+  }
+}

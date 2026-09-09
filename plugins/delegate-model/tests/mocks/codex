@@ -1,0 +1,53 @@
+#!/usr/bin/env node
+'use strict';
+
+const lib = require('./_lib');
+
+const args = process.argv.slice(2);
+
+if (args[0] === 'login' || args[0] === '--help' || args[0] === 'exec' && args[1] === '--help') {
+  process.stdout.write('codex mock\n');
+  process.exit(0);
+}
+
+lib.markSpawned();
+const b = lib.resolveBehavior();
+const last = lib.lastOutPath(args);
+
+if (b === 'hang') {
+  lib.hang();
+  return;
+}
+
+if (b === 'touch_file') {
+  lib.touchInCwd(args);
+}
+
+function writeLast(text) {
+  if (last) lib.fs.writeFileSync(last, text);
+}
+
+if (b === 'empty' || b === 'touch_file') {
+  writeLast('');
+  process.stdout.write(
+    [
+      JSON.stringify({ type: 'thread.started', thread_id: 'mock-empty-thread' }),
+      JSON.stringify({ type: 'turn.started' }),
+      JSON.stringify({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: '' } }),
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 0 } }),
+    ].join('\n') + '\n'
+  );
+  process.exit(0);
+}
+
+if (b === 'quota') {
+  writeLast('');
+  process.stdout.write(lib.readFixture('codex-quota-exceeded.jsonl'));
+  if (!lib.readFixture('codex-quota-exceeded.jsonl').endsWith('\n')) process.stdout.write('\n');
+  process.exit(1);
+}
+
+writeLast(lib.readFixture('codex-ok.last.txt'));
+process.stdout.write(lib.readFixture('codex-ok.jsonl'));
+if (!lib.readFixture('codex-ok.jsonl').endsWith('\n')) process.stdout.write('\n');
+process.exit(0);

@@ -1,0 +1,7 @@
+{"type":"step_start","timestamp":1757390000000,"sessionID":"ses_0123abcd","part":{"id":"prt_1","sessionID":"ses_0123abcd","messageID":"msg_a","type":"step-start"}}
+{"type":"text","timestamp":1757390000100,"sessionID":"ses_0123abcd","part":{"id":"prt_2","sessionID":"ses_0123abcd","messageID":"msg_a","type":"text","text":"\n\n"}}
+{"type":"tool_use","timestamp":1757390000200,"sessionID":"ses_0123abcd","part":{"id":"prt_3","sessionID":"ses_0123abcd","messageID":"msg_a","type":"tool","tool":"read","state":{"status":"completed","input":{"filePath":"README.md"},"output":"..."}}}
+{"type":"step_finish","timestamp":1757390000300,"sessionID":"ses_0123abcd","part":{"id":"prt_4","sessionID":"ses_0123abcd","messageID":"msg_a","type":"step-finish","reason":"tool-calls"}}
+{"type":"step_start","timestamp":1757390000400,"sessionID":"ses_0123abcd","part":{"id":"prt_5","sessionID":"ses_0123abcd","messageID":"msg_b","type":"step-start"}}
+{"type":"text","timestamp":1757390000500,"sessionID":"ses_0123abcd","part":{"id":"prt_6","sessionID":"ses_0123abcd","messageID":"msg_b","type":"text","text":"OK"}}
+{"type":"step_finish","timestamp":1757390000600,"sessionID":"ses_0123abcd","part":{"id":"prt_7","sessionID":"ses_0123abcd","messageID":"msg_b","type":"step-finish","reason":"stop"}}

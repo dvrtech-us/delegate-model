@@ -1,0 +1,50 @@
+#!/usr/bin/env node
+'use strict';
+
+const lib = require('./_lib');
+
+const args = process.argv.slice(2);
+
+if (args[0] === 'agent' && args[1] === 'list') {
+  process.stdout.write('plan (primary)\nbuild (primary)\n');
+  process.exit(0);
+}
+
+lib.markSpawned();
+const b = lib.resolveBehavior();
+
+if (b === 'hang') {
+  lib.hang();
+  return;
+}
+
+if (b === 'touch_file') {
+  lib.touchInCwd(args);
+}
+
+if (b === 'empty' || b === 'touch_file') {
+  const session = 'ses_empty';
+  process.stdout.write(
+    [
+      JSON.stringify({ type: 'step_start', sessionID: session, part: { messageID: 'msg_a', type: 'step-start' } }),
+      JSON.stringify({ type: 'text', sessionID: session, part: { messageID: 'msg_a', type: 'text', text: '' } }),
+      JSON.stringify({
+        type: 'step_finish',
+        sessionID: session,
+        part: { messageID: 'msg_a', type: 'step-finish', reason: 'stop' },
+      }),
+    ].join('\n') + '\n'
+  );
+  process.exit(0);
+}
+
+if (b === 'quota') {
+  process.stdout.write(
+    JSON.stringify({ type: 'error', sessionID: 'ses_q', message: 'quota exceeded (429)' }) + '\n'
+  );
+  process.exit(1);
+}
+
+process.stdout.write(lib.readFixture('opencode-ok.ndjson'));
+if (!lib.readFixture('opencode-ok.ndjson').endsWith('\n')) process.stdout.write('\n');
+process.exit(0);
