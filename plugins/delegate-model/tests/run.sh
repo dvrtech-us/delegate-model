@@ -67,6 +67,30 @@ json_has_key() {
   ' "$2"
 }
 
+# Exit 0 iff the (possibly dotted) key is PRESENT on the object AND its value
+# is strictly JSON null. Distinguishes null from missing/undefined, unlike
+# comparing a shelled-out empty string (which collapses all three).
+json_is_null_key() {
+  printf '%s' "$1" | "$NODE" -e '
+    const fs = require("fs");
+    let raw = fs.readFileSync(0, "utf8");
+    const start = raw.indexOf("{");
+    if (start < 0) process.exit(2);
+    const j = JSON.parse(raw.slice(start));
+    const parts = process.argv[1].split(".");
+    let parent = j;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (parent == null || typeof parent !== "object") process.exit(2);
+      parent = parent[parts[i]];
+    }
+    const key = parts[parts.length - 1];
+    if (parent == null || typeof parent !== "object" || !Object.prototype.hasOwnProperty.call(parent, key)) {
+      process.exit(1);
+    }
+    process.exit(parent[key] === null ? 0 : 1);
+  ' "$2"
+}
+
 run_wrap() {
   # stdout+stderr captured separately; caller sets env (PATH, MOCK_*).
   # Use bash $(<file) so an empty PATH (not_installed test) still works.
@@ -445,11 +469,10 @@ if [ "$EC" -eq 0 ]; then
   else
     fail "quota: answer text mentioning quota/rate limit/login is ok" "ok=$ok error=$err text=$text out=$OUT"
   fi
-  cost=$(json_field "$OUT" "costUsd")
-  if [ -z "$cost" ]; then
-    pass "grok: total_cost_usd 0 on the wire maps to costUsd null"
+  if json_is_null_key "$OUT" "costUsd"; then
+    pass "grok: total_cost_usd 0 on the wire maps to costUsd null (key present, strictly null)"
   else
-    fail "grok: total_cost_usd 0 on the wire maps to costUsd null" "costUsd=$cost out=$OUT"
+    fail "grok: total_cost_usd 0 on the wire maps to costUsd null (key present, strictly null)" "out=$OUT"
   fi
 else
   fail "quota: answer text mentioning quota/rate limit/login is ok" "exit=$EC out=$OUT err=$ERR"
@@ -518,6 +541,62 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# F5: retry-guard hardening — the DEFECT 1 "error_result" test above uses a
+# mock that EXITS 1, so `successfulExit` alone already blocks the empty
+# retry there; it does not prove the `failed` flag matters. These three cases
+# all EXIT 0 with a structured failure, and split is_error/subtype so each
+# half of the OR is proven independently.
+# ---------------------------------------------------------------------------
+
+MOCK_BEHAVIOR=error_result_exit0
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-error-result-exit0" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  ok=$(json_field "$OUT" "ok")
+  retried=$(json_field "$OUT" "emptyRetried")
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$ok" = "false" ] && [ "$retried" = "false" ] && [ "$cls" = "backend_failed" ]; then
+    pass "F5: exit-0 structured failure (is_error+errors[]) is not empty-retried"
+  else
+    fail "F5: exit-0 structured failure (is_error+errors[]) is not empty-retried" "ok=$ok emptyRetried=$retried class=$cls out=$OUT"
+  fi
+else
+  fail "F5: exit-0 structured failure (is_error+errors[]) is not empty-retried" "exit=$EC out=$OUT err=$ERR"
+fi
+
+MOCK_BEHAVIOR=is_error_only
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-is-error-only" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  ok=$(json_field "$OUT" "ok")
+  retried=$(json_field "$OUT" "emptyRetried")
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$ok" = "false" ] && [ "$retried" = "false" ] && [ "$cls" = "backend_failed" ]; then
+    pass "F5: is_error:true ALONE (normal subtype) marks failed, not empty-retried"
+  else
+    fail "F5: is_error:true ALONE (normal subtype) marks failed, not empty-retried" "ok=$ok emptyRetried=$retried class=$cls out=$OUT"
+  fi
+else
+  fail "F5: is_error:true ALONE (normal subtype) marks failed, not empty-retried" "exit=$EC out=$OUT err=$ERR"
+fi
+
+MOCK_BEHAVIOR=error_subtype_only
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-error-subtype-only" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  ok=$(json_field "$OUT" "ok")
+  retried=$(json_field "$OUT" "emptyRetried")
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$ok" = "false" ] && [ "$retried" = "false" ] && [ "$cls" = "backend_failed" ]; then
+    pass "F5: subtype:error_* ALONE (is_error false) marks failed, not empty-retried"
+  else
+    fail "F5: subtype:error_* ALONE (is_error false) marks failed, not empty-retried" "ok=$ok emptyRetried=$retried class=$cls out=$OUT"
+  fi
+else
+  fail "F5: subtype:error_* ALONE (is_error false) marks failed, not empty-retried" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# ---------------------------------------------------------------------------
 # grok DEFECT 2: UNKNOWN_SESSION_RE matches grok's real wording, retry fires
 # ---------------------------------------------------------------------------
 MOCK_BEHAVIOR=ok
@@ -535,6 +614,139 @@ if [ "$EC" -eq 0 ]; then
 else
   fail "grok: type:error Couldn't start session -> unknown-session path, sessionRetried true" "exit=$EC out=$OUT err=$ERR"
 fi
+
+# ---------------------------------------------------------------------------
+# F1: unknown-session detection destroys successful runs
+# ---------------------------------------------------------------------------
+
+# (a)+(b) benign stderr wording that used to false-positive as unknown-session:
+# a genuinely successful run must stay ok:true.
+MOCK_BEHAVIOR=benign_session_stderr
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-benign-stderr" -- "hi"
+if [ "$EC" -eq 0 ]; then
+  ok=$(json_field "$OUT" "ok")
+  text=$(json_field "$OUT" "text")
+  err=$(json_field "$OUT" "error")
+  if [ "$ok" = "true" ] && [ "$text" = "OK" ] && [ -z "$err" ]; then
+    pass "F1: benign stderr 'failed to restore session cache; recovered' stays ok:true"
+  else
+    fail "F1: benign stderr 'failed to restore session cache; recovered' stays ok:true" "ok=$ok text=$text error=$err out=$OUT"
+  fi
+else
+  fail "F1: benign stderr 'failed to restore session cache; recovered' stays ok:true" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# (b) a real auth failure phrased with "Couldn't start session" must classify
+# as auth_required, NOT unknown-session (the narrowed regex no longer matches
+# "couldn't start session" on its own).
+MOCK_BEHAVIOR=session_auth_401
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-auth-401" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  ok=$(json_field "$OUT" "ok")
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$ok" = "false" ] && [ "$cls" = "auth_required" ]; then
+    pass "F1: 'Couldn't start session: unauthorized (401)' -> auth_required, not unknown-session"
+  else
+    fail "F1: 'Couldn't start session: unauthorized (401)' -> auth_required, not unknown-session" "ok=$ok class=$cls out=$OUT"
+  fi
+else
+  fail "F1: 'Couldn't start session: unauthorized (401)' -> auth_required, not unknown-session" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# (b) each surviving UNKNOWN_SESSION_RE alternative, exercised independently.
+UNKNOWN_SESSION_PHRASES=(
+  "unknown session for this workspace"
+  "invalid session token supplied"
+  "session not found on server"
+  "no rollout found for id abc123"
+  "session get failed: 500"
+  "no session id or title matched \"xyz\" for this directory"
+)
+for phrase in "${UNKNOWN_SESSION_PHRASES[@]}"; do
+  MOCK_BEHAVIOR=session_error_custom
+  MOCK_SESSION_ERROR_MSG="$phrase"
+  export MOCK_BEHAVIOR MOCK_SESSION_ERROR_MSG
+  run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-unknown-$(echo "$phrase" | tr -c 'a-zA-Z0-9' '_')" -- "hi"
+  if [ "$EC" -eq 1 ]; then
+    ok=$(json_field "$OUT" "ok")
+    cls=$(json_field "$OUT" "error.class")
+    msg=$(json_field "$OUT" "error.message")
+    if [ "$ok" = "false" ] && [ "$cls" = "backend_failed" ] && [ "$msg" = "$phrase" ]; then
+      pass "F1: UNKNOWN_SESSION_RE alternative '$phrase' classifies as unknown-session"
+    else
+      fail "F1: UNKNOWN_SESSION_RE alternative '$phrase' classifies as unknown-session" "ok=$ok class=$cls message=$msg out=$OUT"
+    fi
+  else
+    fail "F1: UNKNOWN_SESSION_RE alternative '$phrase' classifies as unknown-session" "exit=$EC out=$OUT err=$ERR"
+  fi
+done
+unset MOCK_SESSION_ERROR_MSG
+
+# ---------------------------------------------------------------------------
+# F2: a later structured error must win over an earlier successful result
+# (stream order decides, not a type preference).
+# ---------------------------------------------------------------------------
+MOCK_BEHAVIOR=result_then_error
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-result-then-error" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  ok=$(json_field "$OUT" "ok")
+  cls=$(json_field "$OUT" "error.class")
+  text=$(json_field "$OUT" "text")
+  if [ "$ok" = "false" ] && [ "$cls" = "quota_exceeded" ]; then
+    pass "F2: a later type:error line wins over an earlier type:result line"
+  else
+    fail "F2: a later type:error line wins over an earlier type:result line" "ok=$ok class=$cls text=$text out=$OUT"
+  fi
+else
+  fail "F2: a later type:error line wins over an earlier type:result line" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# ---------------------------------------------------------------------------
+# F3: a stream truncated after the init line must not masquerade as the
+# legacy flat-json fallback, must not be empty-retried, and must preserve the
+# session id for resuming.
+# ---------------------------------------------------------------------------
+MOCK_BEHAVIOR=init_only
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-init-only" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  ok=$(json_field "$OUT" "ok")
+  cls=$(json_field "$OUT" "error.class")
+  sid=$(json_field "$OUT" "sessionId")
+  retried=$(json_field "$OUT" "emptyRetried")
+  if [ "$ok" = "false" ] && [ "$cls" = "parse_error" ] && [ "$sid" = "mock-init-only" ] && [ "$retried" = "false" ]; then
+    pass "F3: init-line-only stream -> parsed:false, sessionId preserved, not empty-retried"
+  else
+    fail "F3: init-line-only stream -> parsed:false, sessionId preserved, not empty-retried" "ok=$ok class=$cls sessionId=$sid emptyRetried=$retried out=$OUT"
+  fi
+else
+  fail "F3: init-line-only stream -> parsed:false, sessionId preserved, not empty-retried" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# ---------------------------------------------------------------------------
+# F4: exit-0 + truly empty stdout + an incidental auth-shaped stderr warning
+# must classify as the honest parse_error, not auth_required.
+# ---------------------------------------------------------------------------
+MOCK_BEHAVIOR=truly_empty_auth_stderr
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-empty-auth-stderr" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  ok=$(json_field "$OUT" "ok")
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$ok" = "false" ] && [ "$cls" = "parse_error" ]; then
+    pass "F4: exit-0 + empty stdout + stderr auth wording -> parse_error, not auth_required"
+  else
+    fail "F4: exit-0 + empty stdout + stderr auth wording -> parse_error, not auth_required" "ok=$ok class=$cls out=$OUT"
+  fi
+else
+  fail "F4: exit-0 + empty stdout + stderr auth wording -> parse_error, not auth_required" "exit=$EC out=$OUT err=$ERR"
+fi
+
+MOCK_BEHAVIOR=ok
+export MOCK_BEHAVIOR
 
 # ---------------------------------------------------------------------------
 # grok DEFECT 3: --brief-file cannot be silently overridden by a trailing brief

@@ -41,7 +41,7 @@ const OPENCODE_READ_PREFIX =
 
 const AUTH_RE = /unauthorized|\b401\b|not authenticated|api key|\blogin\b/i;
 const QUOTA_RE = /\b429\b|rate limit|quota|out of credits/i;
-const UNKNOWN_SESSION_RE = /unknown session|invalid session|session not found|no rollout found|failed to restore session|session get failed|no session id or title matched|couldn't start session/i;
+const UNKNOWN_SESSION_RE = /unknown session|invalid session|session not found|no rollout found|session get failed|no session id or title matched/i;
 
 let emitted = false;
 let activeChild = null;
@@ -757,23 +757,26 @@ function grokParseFallbackFlatJson(trimmed) {
 function grokParse(stdout) {
   const trimmed = String(stdout || '').trim();
   if (!trimmed) {
-    return { parsed: false, text: '', sessionId: null, usage: null, costUsd: null, failed: true, errorMessage: 'empty stdout' };
+    return { parsed: false, text: '', sessionId: null, usage: null, costUsd: null, failed: false, errorMessage: 'empty stdout' };
   }
 
   // 1) streaming-messages-json: NDJSON, one event per line (REUSE the shared splitter).
   const events = parseJsonlLines(trimmed);
   let systemSessionId = null;
-  let resultLine = null;
-  let errorLine = null;
+  // Track the LAST terminal event (type:"result" or type:"error"), whichever
+  // one it is — stream ORDER decides the winner, not a type preference.
+  let lastTerminal = null; // { kind: 'result'|'error', ev }
   for (const ev of events) {
     if (!ev || typeof ev !== 'object') continue;
     if (ev.type === 'system' && ev.session_id) systemSessionId = ev.session_id;
-    if (ev.type === 'result') resultLine = ev;
-    if (ev.type === 'error') errorLine = ev;
+    if (ev.type === 'result') lastTerminal = { kind: 'result', ev };
+    else if (ev.type === 'error') lastTerminal = { kind: 'error', ev };
   }
 
-  // 2) LAST result line wins — the ONLY line the subtype/is_error check applies to.
-  if (resultLine) {
+  // 2) the LAST terminal line wins. If it is a result line, the subtype/is_error
+  // check applies; if it is an error line, it always means failure.
+  if (lastTerminal && lastTerminal.kind === 'result') {
+    const resultLine = lastTerminal.ev;
     const text = resultLine.result == null ? '' : String(resultLine.result);
     const sessionId = resultLine.session_id || systemSessionId || null;
     const usage = resultLine.usage || null;
@@ -802,13 +805,15 @@ function grokParse(stdout) {
     };
   }
 
-  // 3) else LAST pre-session `{"type":"error", ...}` line.
-  if (errorLine) {
+  // 3) else the LAST `{"type":"error", ...}` line (pre-session failure, or a
+  // later structured error that superseded an earlier result line).
+  if (lastTerminal && lastTerminal.kind === 'error') {
+    const errorLine = lastTerminal.ev;
     const errorMessage = String(errorLine.message || '');
     return {
       parsed: true,
       text: '',
-      sessionId: null,
+      sessionId: systemSessionId || null,
       usage: null,
       costUsd: null,
       failed: true,
@@ -819,9 +824,30 @@ function grokParse(stdout) {
     };
   }
 
-  // 4) else fall back to the old flat `--output-format json` shape (--json-schema,
-  // --extra-args overriding our flag, or an older grok CLI on PATH).
-  return grokParseFallbackFlatJson(trimmed);
+  // 4) No terminal result/error line. If we saw NO recognizable streaming event
+  // at all (no object with a string `type`), this is the old flat
+  // `--output-format json` shape (--json-schema implies it, or --extra-args
+  // overrode our flag) — fall back to that parser. Note this does NOT provide
+  // older-CLI compatibility: a CLI too old for streaming-messages-json rejects
+  // the flag at invocation, which no parser fallback can rescue.
+  const sawStreamingEvent = events.some((ev) => ev && typeof ev === 'object' && typeof ev.type === 'string');
+  if (!sawStreamingEvent) {
+    return grokParseFallbackFlatJson(trimmed);
+  }
+
+  // Recognizable streaming events were seen, but the stream was cut off before
+  // a terminal result/error line arrived. This is a parse failure — NOT a
+  // structured backend failure — but the session id from the init line (if
+  // any) is preserved so the caller can still resume.
+  return {
+    parsed: false,
+    text: '',
+    sessionId: systemSessionId || null,
+    usage: null,
+    costUsd: null,
+    failed: false,
+    errorMessage: 'incomplete stream: no terminal result line',
+  };
 }
 
 function grokResolvedModel(model) {
@@ -1005,7 +1031,7 @@ function classify({ timedOut, exitCode, stderr, parsed, backend }) {
   if (failedRun && QUOTA_RE.test(surfaces)) {
     return { class: 'quota_exceeded', message: parsed && parsed.errorMessage ? parsed.errorMessage : 'quota exceeded', hint: 'add credits or wait for quota reset' };
   }
-  if (isUnknownSession(parsed, stderr)) {
+  if (failedRun && isUnknownSession(parsed, stderr)) {
     return { class: 'backend_failed', message: (parsed && parsed.errorMessage) || 'unknown session', hint: 'omit --session and retry' };
   }
   if (!parsed || parsed.parsed === false) {
@@ -1202,7 +1228,12 @@ async function main() {
   let result = await once();
   let parsed = parseFor(opts.backend, result.stdout, lastTxtPath);
 
-  if (opts.session && isUnknownSession(parsed, result.stderr) && !result.timedOut) {
+  if (
+    opts.session &&
+    !result.timedOut &&
+    isFailedRun(result.exitCode, parsed) &&
+    isUnknownSession(parsed, result.stderr)
+  ) {
     sessionRetried = true;
     ctx.session = null;
     args = buildFor(opts.backend, ctx);

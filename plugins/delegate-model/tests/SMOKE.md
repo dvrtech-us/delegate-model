@@ -8,6 +8,15 @@
 > block in the grok section below are updated to match; everything else in this file (codex,
 > opencode) is unaffected and still reflects the original recording. Re-capture this fixture
 > against the real CLI the next time a manual smoke pass is done.
+>
+> **Note (2026-09-09, follow-up):** an adversarial review of that same fix found four further
+> `grokParse` defects (unknown-session false positives/gating, a later structured error being
+> discarded, a truncated stream masquerading as legacy flat-JSON, and empty stdout fabricating
+> failure evidence), fixed on the same branch — see the trail entry's "Follow-up corrections
+> (2026-09-09)" section. The clean success run recorded below doesn't exercise any of those
+> failure/edge-case paths, so the JSON above is unaffected, but do not treat this file as
+> covering them: it has no recording of an unknown-session retry, a truncated stream, or an
+> empty-stdout run under `streaming-messages-json`.
 
 Read-mode only, real CLIs on this machine. Recorded from:
 
