@@ -372,6 +372,19 @@ if [ "$EC" -eq 0 ]; then
   else
     fail "dry-run: grok read has --no-subagents and --deny mcp__*, no --disable-web-search" "node_exit=$grokflags cmd=$cmd0"
   fi
+  printf '%s' "$OUT" | "$NODE" -e '
+    const fs = require("fs");
+    const raw = fs.readFileSync(0, "utf8");
+    const j = JSON.parse(raw.slice(raw.indexOf("{")));
+    const cmd = j.command || [];
+    const idx = cmd.indexOf("--output-format");
+    if (idx < 0 || cmd[idx + 1] !== "streaming-messages-json") process.exit(20);
+  '
+  if [ $? -eq 0 ]; then
+    pass "dry-run: grok argv uses --output-format streaming-messages-json"
+  else
+    fail "dry-run: grok argv uses --output-format streaming-messages-json" "cmd=$cmd0"
+  fi
 else
   fail "dry-run: prints argv, spawns nothing" "exit=$EC out=$OUT"
 fi
@@ -432,8 +445,136 @@ if [ "$EC" -eq 0 ]; then
   else
     fail "quota: answer text mentioning quota/rate limit/login is ok" "ok=$ok error=$err text=$text out=$OUT"
   fi
+  cost=$(json_field "$OUT" "costUsd")
+  if [ -z "$cost" ]; then
+    pass "grok: total_cost_usd 0 on the wire maps to costUsd null"
+  else
+    fail "grok: total_cost_usd 0 on the wire maps to costUsd null" "costUsd=$cost out=$OUT"
+  fi
 else
   fail "quota: answer text mentioning quota/rate limit/login is ok" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# ---------------------------------------------------------------------------
+# grok DEFECT 1: streaming-messages-json dual-parse
+# ---------------------------------------------------------------------------
+
+# error result line (is_error + errors[], NO `result` key): must NOT be
+# retried as an empty success, must classify as a failure, and errorMessage
+# must come only from errors[] (never the NDJSON blob).
+MOCK_BEHAVIOR=error_result
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-error-result" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  ok=$(json_field "$OUT" "ok")
+  retried=$(json_field "$OUT" "emptyRetried")
+  cls=$(json_field "$OUT" "error.class")
+  msg=$(json_field "$OUT" "error.message")
+  if [ "$ok" = "false" ] && [ "$retried" = "false" ] && [ "$cls" = "backend_failed" ] \
+    && [ "$msg" = "Reached maximum turns (120) without completing the task." ]; then
+    pass "grok: error result line (no result key) is a failure, not empty-retried, errorMessage from errors[]"
+  else
+    fail "grok: error result line (no result key) is a failure, not empty-retried, errorMessage from errors[]" \
+      "ok=$ok emptyRetried=$retried class=$cls message=$msg out=$OUT"
+  fi
+else
+  fail "grok: error result line (no result key) is a failure, not empty-retried, errorMessage from errors[]" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# quota wording inside errors[] still classifies as quota_exceeded (not a
+# generic backend_failed / parse_error), and errorMessage is the errors[] text.
+MOCK_BEHAVIOR=quota
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-quota-result" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  ok=$(json_field "$OUT" "ok")
+  cls=$(json_field "$OUT" "error.class")
+  msg=$(json_field "$OUT" "error.message")
+  if [ "$ok" = "false" ] && [ "$cls" = "quota_exceeded" ] && [ "$msg" = "quota exceeded (429): rate limit hit" ]; then
+    pass "grok: is_error result with quota wording in errors[] -> quota_exceeded"
+  else
+    fail "grok: is_error result with quota wording in errors[] -> quota_exceeded" "ok=$ok class=$cls message=$msg out=$OUT"
+  fi
+else
+  fail "grok: is_error result with quota wording in errors[] -> quota_exceeded" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# old flat `--output-format json` shape must still parse via the fallback
+# branch (--json-schema, --extra-args, or an older grok CLI on PATH).
+MOCK_BEHAVIOR=legacy_json
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/grok-legacy-json" -- "hi"
+if [ "$EC" -eq 0 ]; then
+  text=$(json_field "$OUT" "text")
+  sid=$(json_field "$OUT" "sessionId")
+  ok=$(json_field "$OUT" "ok")
+  if [ "$text" = "OK" ] && [ "$sid" = "01a083f0-1c50-7e01-af19-c746a5bb6e91" ] && [ "$ok" = "true" ]; then
+    pass "grok: old flat json stdout still parses via fallback"
+  else
+    fail "grok: old flat json stdout still parses via fallback" "text=$text sid=$sid ok=$ok out=$OUT"
+  fi
+else
+  fail "grok: old flat json stdout still parses via fallback" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# ---------------------------------------------------------------------------
+# grok DEFECT 2: UNKNOWN_SESSION_RE matches grok's real wording, retry fires
+# ---------------------------------------------------------------------------
+MOCK_BEHAVIOR=ok
+export MOCK_BEHAVIOR
+run_wrap grok --mode read --cwd "$PARSE_CWD" --session bogus-session --run-dir "$PARSE_RUN/grok-session-retry" -- "hi"
+if [ "$EC" -eq 0 ]; then
+  ok=$(json_field "$OUT" "ok")
+  retried=$(json_field "$OUT" "sessionRetried")
+  text=$(json_field "$OUT" "text")
+  if [ "$ok" = "true" ] && [ "$retried" = "true" ] && [ "$text" = "OK" ]; then
+    pass "grok: type:error Couldn't start session -> unknown-session path, sessionRetried true"
+  else
+    fail "grok: type:error Couldn't start session -> unknown-session path, sessionRetried true" "ok=$ok sessionRetried=$retried text=$text out=$OUT"
+  fi
+else
+  fail "grok: type:error Couldn't start session -> unknown-session path, sessionRetried true" "exit=$EC out=$OUT err=$ERR"
+fi
+
+# ---------------------------------------------------------------------------
+# grok DEFECT 3: --brief-file cannot be silently overridden by a trailing brief
+# ---------------------------------------------------------------------------
+BRIEF_FILE="$TMPROOT/brief.txt"
+printf 'the real plan\n' > "$BRIEF_FILE"
+run_wrap grok --mode read --cwd "$PARSE_CWD" --brief-file "$BRIEF_FILE" -- "trailing brief"
+if [ "$EC" -eq 2 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "usage" ]; then
+    pass "usage: --brief-file with trailing brief exits 2 instead of silently picking one"
+  else
+    fail "usage: --brief-file with trailing brief exits 2 instead of silently picking one" "error.class=$cls out=$OUT"
+  fi
+else
+  fail "usage: --brief-file with trailing brief exits 2 instead of silently picking one" "exit=$EC out=$OUT err=$ERR"
+fi
+
+run_wrap grok --mode read --cwd "$PARSE_CWD" --brief-file "$BRIEF_FILE" "positional brief"
+if [ "$EC" -eq 2 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "usage" ]; then
+    pass "usage: --brief-file with positional brief exits 2 instead of silently picking one"
+  else
+    fail "usage: --brief-file with positional brief exits 2 instead of silently picking one" "error.class=$cls out=$OUT"
+  fi
+else
+  fail "usage: --brief-file with positional brief exits 2 instead of silently picking one" "exit=$EC out=$OUT err=$ERR"
+fi
+
+run_wrap grok --mode read --cwd "$PARSE_CWD" --brief-file "$BRIEF_FILE" --run-dir "$PARSE_RUN/brief-file-only"
+if [ "$EC" -eq 0 ]; then
+  brief_written=$(cat "$PARSE_RUN/brief-file-only/stdin.txt" 2>/dev/null)
+  if [ "$brief_written" = "the real plan" ]; then
+    pass "brief-file: used alone still reads the file"
+  else
+    fail "brief-file: used alone still reads the file" "stdin.txt='$brief_written' out=$OUT"
+  fi
+else
+  fail "brief-file: used alone still reads the file" "exit=$EC out=$OUT err=$ERR"
 fi
 
 # ---------------------------------------------------------------------------

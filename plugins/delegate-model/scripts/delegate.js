@@ -41,7 +41,7 @@ const OPENCODE_READ_PREFIX =
 
 const AUTH_RE = /unauthorized|\b401\b|not authenticated|api key|\blogin\b/i;
 const QUOTA_RE = /\b429\b|rate limit|quota|out of credits/i;
-const UNKNOWN_SESSION_RE = /unknown session|invalid session|session not found|no rollout found/i;
+const UNKNOWN_SESSION_RE = /unknown session|invalid session|session not found|no rollout found|failed to restore session|session get failed|no session id or title matched|couldn't start session/i;
 
 let emitted = false;
 let activeChild = null;
@@ -359,7 +359,10 @@ function parseCli(argv) {
     positional.push(a);
   }
 
-  if (!opts.brief && opts.briefFile) {
+  if (opts.briefFile && (opts.brief || positional.length)) {
+    failUsage('--brief-file cannot be combined with a trailing/positional brief; pass only one', { backend: opts.backend });
+  }
+  if (opts.briefFile) {
     try {
       opts.brief = fs.readFileSync(opts.briefFile, 'utf8');
     } catch (err) {
@@ -712,15 +715,13 @@ function grokBuildArgs({ brief, cwd, mode, model, session, extraArgs }) {
   } else {
     args.push('--always-approve', '--max-turns', '120');
   }
-  args.push('--cwd', cwd, '--output-format', 'json');
+  args.push('--cwd', cwd, '--output-format', 'streaming-messages-json');
   if (model) args.push('-m', model);
   if (session) args.push('-r', session);
   return args.concat(extraArgs);
 }
 
-function grokParse(stdout) {
-  const trimmed = String(stdout || '').trim();
-  if (!trimmed) return { parsed: false, text: '', sessionId: null, usage: null, costUsd: null, errorMessage: 'empty stdout' };
+function grokParseFallbackFlatJson(trimmed) {
   let obj = null;
   try {
     obj = JSON.parse(trimmed);
@@ -736,7 +737,7 @@ function grokParse(stdout) {
     }
   }
   if (!obj || typeof obj !== 'object') {
-    return { parsed: false, text: '', sessionId: null, usage: null, costUsd: null, errorMessage: 'stdout is not a JSON object' };
+    return { parsed: false, text: '', sessionId: null, usage: null, costUsd: null, failed: false, errorMessage: 'stdout is not a JSON object' };
   }
   const errorMessage = obj.error ? String(obj.error.message || obj.error) : null;
   return {
@@ -745,11 +746,82 @@ function grokParse(stdout) {
     sessionId: obj.sessionId || null,
     usage: obj.usage || null,
     costUsd: typeof obj.total_cost_usd === 'number' ? obj.total_cost_usd : null,
+    failed: !!obj.error,
     errorMessage,
     hasStructuredError: !!obj.error,
     unknownSession: !!(errorMessage && UNKNOWN_SESSION_RE.test(errorMessage)),
     raw: obj,
   };
+}
+
+function grokParse(stdout) {
+  const trimmed = String(stdout || '').trim();
+  if (!trimmed) {
+    return { parsed: false, text: '', sessionId: null, usage: null, costUsd: null, failed: true, errorMessage: 'empty stdout' };
+  }
+
+  // 1) streaming-messages-json: NDJSON, one event per line (REUSE the shared splitter).
+  const events = parseJsonlLines(trimmed);
+  let systemSessionId = null;
+  let resultLine = null;
+  let errorLine = null;
+  for (const ev of events) {
+    if (!ev || typeof ev !== 'object') continue;
+    if (ev.type === 'system' && ev.session_id) systemSessionId = ev.session_id;
+    if (ev.type === 'result') resultLine = ev;
+    if (ev.type === 'error') errorLine = ev;
+  }
+
+  // 2) LAST result line wins — the ONLY line the subtype/is_error check applies to.
+  if (resultLine) {
+    const text = resultLine.result == null ? '' : String(resultLine.result);
+    const sessionId = resultLine.session_id || systemSessionId || null;
+    const usage = resultLine.usage || null;
+    const costUsd =
+      typeof resultLine.total_cost_usd === 'number' && resultLine.total_cost_usd !== 0
+        ? resultLine.total_cost_usd
+        : null;
+    const failed = resultLine.is_error === true || String(resultLine.subtype || '').startsWith('error_');
+    const errorMessage = Array.isArray(resultLine.errors)
+      ? resultLine.errors
+          .map((e) => (typeof e === 'string' ? e : (e && e.message) || ''))
+          .filter(Boolean)
+          .join('; ')
+      : null;
+    return {
+      parsed: true,
+      text,
+      sessionId,
+      usage,
+      costUsd,
+      failed,
+      errorMessage,
+      hasStructuredError: failed,
+      unknownSession: !!(errorMessage && UNKNOWN_SESSION_RE.test(errorMessage)),
+      raw: resultLine,
+    };
+  }
+
+  // 3) else LAST pre-session `{"type":"error", ...}` line.
+  if (errorLine) {
+    const errorMessage = String(errorLine.message || '');
+    return {
+      parsed: true,
+      text: '',
+      sessionId: null,
+      usage: null,
+      costUsd: null,
+      failed: true,
+      errorMessage,
+      hasStructuredError: true,
+      unknownSession: !!(errorMessage && UNKNOWN_SESSION_RE.test(errorMessage)),
+      raw: errorLine,
+    };
+  }
+
+  // 4) else fall back to the old flat `--output-format json` shape (--json-schema,
+  // --extra-args overriding our flag, or an older grok CLI on PATH).
+  return grokParseFallbackFlatJson(trimmed);
 }
 
 function grokResolvedModel(model) {

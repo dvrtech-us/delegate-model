@@ -56,7 +56,7 @@ Every call prints one JSON object, whether it succeeded or not:
   "backend": "grok",
   "mode": "write",
   "cwd": "/abs/repo-wt-task",
-  "command": ["grok", "-p", "…", "--always-approve", "--max-turns", "120", "--cwd", "/abs/repo-wt-task", "--output-format", "json"],
+  "command": ["grok", "-p", "…", "--always-approve", "--max-turns", "120", "--cwd", "/abs/repo-wt-task", "--output-format", "streaming-messages-json"],
   "exitCode": 0,
   "text": "…final message…",
   "textFile": "/…/runs/20260908-…/text.md",

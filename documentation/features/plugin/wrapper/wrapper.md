@@ -25,7 +25,7 @@ A single Node script that invokes one of three local CLI agents (Grok, Codex, op
 3. **Worktree setup** (if `--worktree NAME` given). Requires `--cwd` to be a git repo, else exit code 2. Creates or reuses a sibling worktree at `<cwd>-wt-<NAME>` on branch `delegate/<NAME>`. The effective working directory for the backend becomes the worktree path.
 4. **Argv construction.** Backend-specific flags are assembled per the read/write mode table below. The brief is passed on stdin where the backend supports it (Codex), otherwise as a single argv element (Grok, opencode) — never through a shell.
 5. **Spawn and timeout.** `child_process.spawn` with an argv array (no shell interpolation). Default timeout is `--timeout` or `DELEGATE_TIMEOUT_SECS` or 1800 seconds. On timeout: SIGTERM, wait 5s, then SIGKILL.
-6. **Output capture.** stdout/stderr interleaved into a run-scoped raw log with stream tags.
+6. **Output capture.** stdout/stderr interleaved into a run-scoped raw log with stream tags. For grok's `streaming-messages-json` output, `raw.log` now contains full `tool_result` payloads per streamed line (not just the final result), and stdout is accumulated in memory for the duration of the run, so grok runs produce a larger `raw.log` and use more memory than under the old buffered `json` format. This is an accepted tradeoff for observability: the old format emitted nothing until the process exited, making a long-running grok call indistinguishable from a hang.
 7. **Parsing**, backend-specific (see below).
 8. **Retry rules**, applied after parsing (see below).
 9. **Envelope emission.** One JSON object to stdout, always, whether `ok` is true or false.
@@ -37,7 +37,7 @@ Beyond `--mode`, `--cwd`, `--model`, `--session`, `--worktree [NAME]`, and `--dr
 | Option | Meaning |
 |---|---|
 | `--timeout SECS` | Overrides the default timeout (see Configuration in the baseline). Must be a positive number. |
-| `--brief-file PATH` | Read the brief from a file instead of (or when nothing follows `--`) the trailing argv words. Useful for long briefs. |
+| `--brief-file PATH` | Read the brief from a file instead of the trailing argv words after `--`. Useful for long briefs. Supplying **both** `--brief-file` and a trailing brief is a usage error (exit 2) — the wrapper never silently picks a winner. |
 | `--extra-args "…"` | Shell-word-split and appended verbatim to the backend argv, after all wrapper-owned flags. Escape hatch for a flag the wrapper doesn't otherwise expose. |
 | `--run-dir PATH` | Use this directory for run artifacts instead of the default `${CLAUDE_PLUGIN_DATA}/runs/<timestamp>-<backend>-<rand>` path. |
 | `--worktree=NAME` | Equivalent to `--worktree NAME`; the `=NAME` form is accepted alongside the space-separated form. |
@@ -46,23 +46,40 @@ Beyond `--mode`, `--cwd`, `--model`, `--session`, `--worktree [NAME]`, and `--dr
 
 | Backend | Read mode | Write mode | Always |
 |---|---|---|---|
-| grok | `-p BRIEF --permission-mode dontAsk --deny Write --deny Edit --deny Bash --deny mcp__* --no-subagents` | `-p BRIEF --always-approve --max-turns 120` | `--cwd CWD --output-format json`; `-m MODEL` if given; `-r SESSION` if given |
+| grok | `-p BRIEF --permission-mode dontAsk --deny Write --deny Edit --deny Bash --deny mcp__* --no-subagents` | `-p BRIEF --always-approve --max-turns 120` | `--cwd CWD --output-format streaming-messages-json`; `-m MODEL` if given; `-r SESSION` if given |
 | codex | `-s read-only` | `-s workspace-write` | `exec -C CWD --skip-git-repo-check --json -o <run-dir>/last.txt -s MODE [-m MODEL] [resume ID] -` (brief on stdin); the `exec` options come before the `resume` subcommand, and `resume ID` only appears when `--session` is given |
 | opencode | `--agent plan --auto` plus a read-only instruction prefix on the brief | `--auto` | `run --format json --dir CWD -m MODEL`; `-s SESSION` if given |
 
 The wrapper never emits `--permission-mode acceptEdits` for Grok on any mode — that flag gates shell tools without gating edits, which strands a headless run before it can write. Grok's write posture is always `--always-approve`. Grok read mode also denies `mcp__*` (all MCP tools) and passes `--no-subagents`, so a read-mode Grok run cannot call MCP tools or spawn subagents.
 
-The full grok read argv is `-p BRIEF --permission-mode dontAsk --deny Write --deny Edit --deny Bash --deny mcp__* --no-subagents --cwd CWD --output-format json`, with `-m MODEL` and `-r SESSION` appended when given.
+The full grok read argv is `-p BRIEF --permission-mode dontAsk --deny Write --deny Edit --deny Bash --deny mcp__* --no-subagents --cwd CWD --output-format streaming-messages-json`, with `-m MODEL` and `-r SESSION` appended when given.
 
 ### Parsing per backend
 
 | Backend | Output shape | Extraction |
 |---|---|---|
-| grok | One JSON object on stdout | `text`, `sessionId`, `stopReason`, `usage`, `total_cost_usd` read directly |
+| grok | Streaming NDJSON (`streaming-messages-json`), with a dual-parse fallback | See below |
 | codex | JSONL events | `sessionId` from `thread.started.thread_id`; final text concatenated from `item.completed` events where `item.type == "agent_message"` (prefer the `-o` output file's content when present); `usage` from `turn.completed.usage`; a `turn.failed` event sets `ok: false` |
 | opencode | NDJSON events | Track `text` parts by `messageID`; final text is the parts belonging to the message whose `step_finish` event has `reason == "stop"` (fallback: last message with any text); `sessionID` from any event; an `error` event sets `ok: false` |
 
 Unparseable output in any backend produces `ok: false`, `error.class: "parse_error"`, with the raw output preserved in `rawLog`.
+
+#### Grok parsing (`grokParse`), in precedence order
+
+Grok's `-p` output is line-delimited JSON. The wrapper reuses its existing `parseJsonlLines` helper and then works through these cases in order:
+
+1. **The last line with `type: "result"`** (the normal, successful case):
+   - `text` — `result` field, `''` if `null`/absent, never `String(undefined)`.
+   - `sessionId` — `session_id` on the result line, falling back to the `system`/`init` line's `session_id`, else `null`.
+   - `usage` — the `usage` field as-is. This is the Anthropic Messages `message.usage` shape: it includes a nested `server_tool_use` object and no longer has `reasoning_tokens` or `total_tokens` (see the old flat-`json` shape below for contrast).
+   - `costUsd` — `total_cost_usd` when it is a number and not `0`; a wire value of `0` maps to `costUsd: null`. Per grok's docs, `0`/absent means "cost unreported or incomplete," never "free," so the wrapper never reports a `0` cost as real.
+   - `failed` / `hasStructuredError` — `true` when `is_error === true` or `subtype` starts with `error_` **on this result line only**. The `system`/`init` line's own `subtype: "init"` is never consulted, and a missing `subtype` never means failure.
+   - `errorMessage` — built only from `errors[]` on the result line (each entry's string, or its `.message`, joined with `; `). Never the answer text, never the whole result object, never the raw NDJSON blob — this feeds the same-named classification channels described below, and putting answer text there previously caused a quota false positive (see `trail/2026-09-08-error-classification-channels.md`).
+2. **Else the last line with `type: "error"`** (a pre-session failure, e.g. `{"type":"error","message":"Couldn't start session: ..."}`): `text: ''`, `errorMessage` from `message`, `failed: true`, `hasStructuredError: true`.
+3. **Else fall back to the old flat-`json` parser**: `JSON.parse` of the whole stdout, or (if that fails) a first-`{`/last-`}` brace slice, reading `text` (`obj.text == null ? '' : String(obj.text)`), `sessionId`, `error`, and `total_cost_usd` directly, exactly as before this change. This fallback exists because `--json-schema` implies `--output-format json` regardless of the wrapper's own flag, `--extra-args` is appended after the wrapper's flag and can override it, and an older `grok` CLI on `PATH` may not support `streaming-messages-json` at all.
+4. **No stdout at all** — unchanged: `parsed: false`, `error: 'empty stdout'`.
+
+`grokParse` now returns a `failed` flag (codex and opencode parsers already did). This matters for the empty-retry gate (`successfulExit && parsed.parsed && isEmptyText(...) && !parsed.failed`): an error result line has no `result` key, so `text` is `''`; without `failed` the wrapper would retry a real auth/quota/max-turns failure as if it were an empty success.
 
 ### Retry rules
 
@@ -75,14 +92,14 @@ Unparseable output in any backend produces `ok: false`, `error.class: "parse_err
 
 ### Classification
 
-`error.class` is decided by inspecting only three channels: raw stderr, a parsed error message (`parsed.errorMessage`, e.g. Codex's `turn.failed`/`error` event message or Grok's `obj.error`), and whether a structured error event was seen at all (`hasStructuredError`/`failed`). The model's own answer text (`parsed.text`) is never inspected for classification. This matters because a successful, on-topic answer can legitimately contain words like "quota" or "rate limit" without that being a failure.
+`error.class` is decided by inspecting only three channels: raw stderr, a parsed error message (`parsed.errorMessage`, e.g. Codex's `turn.failed`/`error` event message, Grok's `errors[]`/`type:error` message text, or the old flat-`json` fallback's `obj.error`), and whether a structured error event was seen at all (`hasStructuredError`/`failed`). The model's own answer text (`parsed.text`) is never inspected for classification. This matters because a successful, on-topic answer can legitimately contain words like "quota" or "rate limit" without that being a failure.
 
 Classification only runs when the run looks failed: the process exited non-zero, the backend reported failure through a structured error event, or a structured error event exists at all. A zero exit with no structured error and no matching text in the error channels is never reclassified as a failure based on content alone.
 
 Within a failed run, in order:
 
 1. `QUOTA_RE` (`\b429\b|rate limit|quota|out of credits`, case-insensitive) matched against stderr + parsed error message → `quota_exceeded`.
-2. `UNKNOWN_SESSION_RE` (`unknown session|invalid session|session not found|no rollout found`, case-insensitive) matched, or the parser's own `unknownSession` flag → `backend_failed` with a hint to omit `--session` (this also drives the session-retry rule above).
+2. `UNKNOWN_SESSION_RE` matched against stderr, or the parser's own `unknownSession` flag → `backend_failed` with a hint to omit `--session` (this also drives the session-retry rule above). The regex is `unknown session|invalid session|session not found|no rollout found|failed to restore session|couldn't start session|no session id or title matched`, case-insensitive — kept deliberately narrow (no bare "session" or "not found") to avoid false-positiving on unrelated stderr noise. It was widened to also match grok's real resume-failure wording (`Session "<id>" not found locally, restoring conversation from remote...`, `Error: Failed to restore session from remote: ...`, `no session id or title matched "<id>" for this directory`, and `{"type":"error","message":"Couldn't start session: ..."}`); before this the session-retry path never fired for grok at all — a bad `--session` fell through to `parse_error`/"empty stdout" with `sessionRetried: false`.
 3. Output that failed to parse at all: `AUTH_RE` (`unauthorized|\b401\b|not authenticated|api key|\blogin\b`) matched → `auth_required`; otherwise `parse_error`.
 4. Output that parsed: `AUTH_RE` matched → `auth_required`; otherwise a generic `backend_failed` with the parsed error message or `backend exited <code>`.
 

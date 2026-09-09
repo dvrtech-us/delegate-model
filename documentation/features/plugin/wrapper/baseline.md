@@ -11,6 +11,13 @@
 - Grok read mode always denies `mcp__*` and passes `--no-subagents`; a read-mode Grok run can never call MCP tools or spawn subagents.
 - Codex always receives `--skip-git-repo-check` on `exec`, regardless of whether `--cwd` is already trusted. Codex's `exec` options (`-C`, `--skip-git-repo-check`, `--json`, `-o`, `-s`, `-m`) always come before the `resume ID` subcommand when `--session` is given, never after.
 - Error classification never inspects the model's own answer text (`text`/`parsed.text`); it only inspects stderr, a parsed error message, and whether a structured error event was seen, and only when the run looks failed (non-zero exit, backend-reported failure, or a structured error event). A successful answer that happens to mention "quota" or "login" is never reclassified as a failure.
+- Grok always runs with `--output-format streaming-messages-json`, never `json`, except when `--json-schema` or `--extra-args` overrides the wrapper's own flag; the parser (`grokParse`) always falls back to the old flat-`json` shape (whole-stdout `JSON.parse`, or a first-`{`/last-`}` brace slice) when no `type: "result"` or `type: "error"` line is present in the streamed output.
+- `grokParse` always sets `failed: true` when the terminal `result` line has `is_error === true` or a `subtype` starting with `error_`, or when the last line is `type: "error"`; this check is evaluated only on that terminal line, never on the `system`/`init` line's own `subtype: "init"`, and a missing `subtype` never means failure.
+- Grok's `errorMessage` is built only from the result line's `errors[]` array or a `type: "error"` line's `message` field; it never contains the answer text, the whole result object, or the raw NDJSON blob.
+- Grok's `costUsd` maps a wire `total_cost_usd` of `0` to `null`, never to `0`, on the theory that grok reports `0`/absent for "cost unreported or incomplete," never for "free."
+- Grok's `usage` object, when present, is the Anthropic Messages `message.usage` shape: it always includes a nested `server_tool_use` object and never includes `reasoning_tokens` or `total_tokens` (those existed under the old flat-`json` format and no longer appear under `streaming-messages-json`).
+- `UNKNOWN_SESSION_RE` matches grok's real resume-failure wording (`Session "<id>" not found locally...`, `Failed to restore session from remote...`, `no session id or title matched...`, `Couldn't start session: ...`) in addition to the generic phrasing already matched for codex/opencode; it stays narrow and never matches on bare "session" or "not found" alone.
+- Supplying both `--brief-file` and a trailing/positional brief after `--` is always a usage error (exit 2, `failUsage`); the wrapper never silently picks one and discards the other.
 - `--dry-run` never spawns a child process and never writes a run directory; it prints exactly `{ command, cwd, timeoutSecs, mode, backend, model, worktree }` and exits 0. No environment variables are ever included in that output.
 - A write-mode run always captures `gitStatus` via `git status --short`, both as retry-decision input and as an envelope field.
 - Empty-text retries happen at most once per invocation.
@@ -29,6 +36,7 @@
 | opencode without `--model` | usage error | yes (exit 2) |
 | `--worktree` with non-git `--cwd` | usage error | yes (exit 2) |
 | backend binary not found | not_installed | yes (exit 2) |
+| both `--brief-file` and a trailing/positional brief supplied | usage error | yes (exit 2) |
 
 ## Side effects in order (write mode)
 
@@ -61,6 +69,7 @@ Not applicable — this is a local single-user CLI wrapper, no auth boundary of 
 ## Known limitations
 
 - The wrapper installs `SIGTERM`/`SIGINT` handlers that kill the active child's process group before the wrapper itself exits. The child is spawned detached specifically so this works. If the wrapper process is sent `SIGKILL` (uncatchable), neither handler runs and the detached child may keep running after the wrapper is gone.
+- Grok's `raw.log` and in-memory stdout buffer are larger under `streaming-messages-json` than they were under the old buffered `json` format, because every streamed line (including full `tool_result` payloads) is captured, not just the final result. Accepted for now in exchange for observability: the old format emitted nothing until the process exited, so a long-running grok call was indistinguishable from a hang.
 
 ## Tests
 

@@ -1,5 +1,14 @@
 # Wrapper smoke (2026-09-08)
 
+> **Note (2026-09-09):** the grok recording below predates the grok adapter fix (see
+> `documentation/features/plugin/wrapper/trail/2026-09-09-grok-streaming-output-format.md`).
+> Grok now runs with `--output-format streaming-messages-json` instead of `json`, and its
+> `usage` object follows the Anthropic Messages `message.usage` shape (gains nested
+> `server_tool_use`, loses `reasoning_tokens`/`total_tokens`). The `command` argv and `usage`
+> block in the grok section below are updated to match; everything else in this file (codex,
+> opencode) is unaffected and still reflects the original recording. Re-capture this fixture
+> against the real CLI the next time a manual smoke pass is done.
+
 Read-mode only, real CLIs on this machine. Recorded from:
 
 ```
@@ -33,7 +42,7 @@ node scripts/delegate.js opencode --mode read --cwd /Volumes/dev/repos/personal/
     "--cwd",
     "/Volumes/dev/repos/personal/delegate-model",
     "--output-format",
-    "json"
+    "streaming-messages-json"
   ],
   "exitCode": 0,
   "timedOut": false,
@@ -47,8 +56,9 @@ node scripts/delegate.js opencode --mode read --cwd /Volumes/dev/repos/personal/
     "cache_read_input_tokens": 11648,
     "cache_creation_input_tokens": 0,
     "output_tokens": 37,
-    "reasoning_tokens": 32,
-    "total_tokens": 18382
+    "server_tool_use": {
+      "web_search_requests": 0
+    }
   },
   "costUsd": 0.0033048,
   "emptyRetried": false,

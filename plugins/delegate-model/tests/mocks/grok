@@ -12,47 +12,88 @@ if (b === 'hang') {
   return;
 }
 
+// Mock never recognizes any --session/-r value: simulate grok's real
+// pre-session "Couldn't start session" failure so the wrapper's
+// session-retry path fires (the retry omits -r and lands on `b`'s output).
+const sIdx = args.indexOf('-r');
+if (sIdx >= 0 && args[sIdx + 1]) {
+  process.stdout.write(lib.readFixture('grok-type-error.ndjson'));
+  process.exit(1);
+}
+
 if (b === 'touch_file') {
   lib.touchInCwd(args);
 }
 
+function emitFixture(name, code) {
+  const body = lib.readFixture(name);
+  process.stdout.write(body);
+  if (!body.endsWith('\n')) process.stdout.write('\n');
+  process.exit(code);
+}
+
 if (b === 'empty' || b === 'touch_file') {
   process.stdout.write(
-    JSON.stringify({
-      text: '',
-      stopReason: 'end_turn',
-      sessionId: 'mock-empty-session',
-      usage: { input_tokens: 1, output_tokens: 0 },
-      total_cost_usd: 0,
-    }) + '\n'
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-empty-session' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: '',
+        session_id: 'mock-empty-session',
+        usage: { input_tokens: 1, output_tokens: 0 },
+        total_cost_usd: 0,
+      }),
+    ].join('\n') + '\n'
   );
   process.exit(0);
 }
 
 if (b === 'quota') {
   process.stdout.write(
-    JSON.stringify({
-      text: '',
-      error: 'rate limit / quota exceeded',
-      sessionId: 'mock-quota',
-    }) + '\n'
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-quota' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        session_id: 'mock-quota',
+        errors: [{ message: 'quota exceeded (429): rate limit hit' }],
+      }),
+    ].join('\n') + '\n'
   );
   process.exit(1);
 }
 
 if (b === 'quota_in_text') {
   process.stdout.write(
-    JSON.stringify({
-      text: 'The quota and rate limit for login is fine.',
-      stopReason: 'end_turn',
-      sessionId: 'mock-quota-words',
-      usage: { input_tokens: 1, output_tokens: 10 },
-      total_cost_usd: 0,
-    }) + '\n'
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-quota-words' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'The quota and rate limit for login is fine.',
+        session_id: 'mock-quota-words',
+        usage: { input_tokens: 1, output_tokens: 10 },
+        total_cost_usd: 0,
+      }),
+    ].join('\n') + '\n'
   );
   process.exit(0);
 }
 
-process.stdout.write(lib.readFixture('grok-ok.json'));
-if (!lib.readFixture('grok-ok.json').endsWith('\n')) process.stdout.write('\n');
-process.exit(0);
+// Non-quota structured failure: is_error true, errors[], NO `result` key —
+// exercises the retry-gate fix (must not be retried as an empty success).
+if (b === 'error_result') {
+  emitFixture('grok-error-result.ndjson', 1);
+}
+
+// Old flat `--output-format json` shape (pre-fix CLIs, or --json-schema /
+// --extra-args overriding our --output-format flag) — exercises the fallback.
+if (b === 'legacy_json') {
+  emitFixture('grok-ok.json', 0);
+}
+
+emitFixture('grok-ok.ndjson', 0);
