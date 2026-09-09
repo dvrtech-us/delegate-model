@@ -45,7 +45,6 @@ User preference (memory): Grok for implementation, Codex for adversarial review,
 | `altimate-code` (official) | Quoted heredoc / no-shell to stop injection; `mktemp` + `umask 077` for outputs; verbatim error table | No timeout; no retry |
 | `clawpatch`, `cabinet`, `chorus` (Node orchestrators) | One adapter per backend behind one interface; classified failures (`not_installed`, `auth_required`, `quota_exceeded`, `other`); retry once on unknown session; "approval flags ≠ sandbox" caveat | Persistent daemons (not v1) |
 | `fast-rlm`, `codex-bridge` | Prompt over **stdin**; refuse to run without explicit model; validate output post-hoc, don't trust `--output-schema` | — |
-| `bridgehead-skills` (ours) | Familiar install UX | Many plugins sharing one tree via `strict:false` |
 | `opencode-plusplus` | — | Generic command passthrough: text + exit code only, parsers "planned" |
 
 Nobody ships a grok+codex+opencode family. Nobody serious uses generic passthrough as the primary path.
