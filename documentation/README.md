@@ -13,3 +13,4 @@ Documentation for the `delegate-model` marketplace repo, following the developme
 ## Planning
 
 - [planning/Plugin/2026-09-08-marketplace-plugin-design.md](planning/Plugin/2026-09-08-marketplace-plugin-design.md) — approved design, source of truth for the contract described in the feature docs above.
+- [planning/Plugin/2026-09-13-claude-backend-and-acp.md](planning/Plugin/2026-09-13-claude-backend-and-acp.md) — implemented: add `claude` as a fourth native `-p` backend; ACP deferred. Regex widening still follow-up.

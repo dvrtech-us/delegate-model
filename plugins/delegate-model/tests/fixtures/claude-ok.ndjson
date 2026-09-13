@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"8eac20a9-5166-4f51-bcfc-b7b19f98f756","model":"claude-haiku-4-5-20251001","permissionMode":"dontAsk"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"OK"}]},"session_id":"8eac20a9-5166-4f51-bcfc-b7b19f98f756"}
+{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"8eac20a9-5166-4f51-bcfc-b7b19f98f756","usage":{"input_tokens":10,"output_tokens":43},"total_cost_usd":0.012379,"num_turns":1}

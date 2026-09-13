@@ -8,7 +8,7 @@ The repo root is itself a Claude Code marketplace containing exactly one plugin,
 
 1. User runs `claude plugin marketplace add dvrtech-us/delegate-model`.
 2. User runs `claude plugin install delegate-model@delegate-model`.
-3. The four skills become available, both model-invoked and as `/delegate-model:<name>`.
+3. The five skills become available, both model-invoked and as `/delegate-model:<name>`.
 4. For local development, a contributor instead runs `claude --plugin-dir ./plugins/delegate-model` and uses `/reload-plugins` to pick up edits.
 
 ## Technical flow

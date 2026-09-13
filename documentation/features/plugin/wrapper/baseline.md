@@ -5,7 +5,15 @@
 - The wrapper always emits exactly one JSON object to stdout, whether the run succeeded or failed.
 - `--mode` and `--cwd` are always required; the wrapper never runs without them.
 - `--cwd` is always absolute; a relative path is always exit code 2 and never reaches spawn.
-- opencode always requires `--model`; grok and codex never require it.
+- `<backend>` is one of `grok | codex | opencode | claude`.
+- If `DELEGATE_DEPTH` is already ≥ `DELEGATE_MAX_DEPTH` (default 1), the wrapper always emits `error.class: "recursion_guard"` and exit 2 before worktree, spawn, or run-directory creation, including on `--dry-run`.
+- Every spawned child (and opencode's `agent list` preflight) receives a copy of `process.env` with `DELEGATE_DEPTH` set to the current depth plus one. The wrapper never passes `env: process.env` verbatim.
+- When `DELEGATE_NO_EXTRA_BIN_DIRS=1`, `findBinary` searches only `PATH` and never the hardcoded extra directories (`~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin`).
+- Claude's write posture never uses `--permission-mode acceptEdits`, `--bare`, `--max-turns`, or `--dangerously-skip-permissions`. Write is always `bypassPermissions` plus `--max-budget-usd 5`. Read is always `--tools Read,Grep,Glob` (one comma-joined token), `--permission-mode dontAsk`, `--permission-prompts none`, `--safe-mode`, `--disable-slash-commands`, `--output-format stream-json`, `--verbose`.
+- Claude argv never contains `--cwd`. Working directory is the spawn `cwd` only.
+- Claude's brief is always the positional immediately after `-p`, never stdin (`usesStdinBrief` is true only for codex).
+- Claude's `costUsd` reports the wire `total_cost_usd` as-is, including `0`. Grok's `costUsd` 0→null rule is grok-only.
+- opencode and claude always require `--model`; grok and codex never require it.
 - The brief is always passed without going through a shell (argv array or stdin, never string interpolation into a shell command).
 - Grok's write posture never uses `--permission-mode acceptEdits`, on any mode, ever.
 - Grok read mode always denies `mcp__*` and passes `--no-subagents`; a read-mode Grok run can never call MCP tools or spawn subagents.
@@ -18,7 +26,7 @@
 - Grok's `errorMessage` is built only from the result line's `errors[]` array or a `type: "error"` line's `message` field; it never contains the answer text, the whole result object, or the raw NDJSON blob.
 - Grok's `costUsd` maps a wire `total_cost_usd` of `0` to `null`, never to `0`, on the theory that grok reports `0`/absent for "cost unreported or incomplete," never for "free."
 - Grok's `usage` object, when present, is the Anthropic Messages `message.usage` shape: it always includes a nested `server_tool_use` object and never includes `reasoning_tokens` or `total_tokens` (those existed under the old flat-`json` format and no longer appear under `streaming-messages-json`).
-- `UNKNOWN_SESSION_RE` is exactly `unknown session|invalid session|session not found|no rollout found|session get failed|no session id or title matched`, case-insensitive, shared by all three backends; it never matches on bare "session" or "not found" alone. It deliberately excludes `failed to restore session` (matches benign recovery warnings such as `Warning: failed to restore session cache; recovered` on an otherwise-successful run, turning success into a false failure) and `couldn't start session` (matches grok's real auth failure `Couldn't start session: unauthorized (401)`, which must classify as `auth_required` instead). Grok's real missing-session failure is covered by `session get failed` and `no session id or title matched "<id>" for this directory`.
+- `UNKNOWN_SESSION_RE` is exactly `unknown session|invalid session|session not found|no rollout found|session get failed|no session id or title matched`, case-insensitive, shared by all four backends; it never matches on bare "session" or "not found" alone. It deliberately excludes `failed to restore session` (matches benign recovery warnings such as `Warning: failed to restore session cache; recovered` on an otherwise-successful run, turning success into a false failure) and `couldn't start session` (matches grok's real auth failure `Couldn't start session: unauthorized (401)`, which must classify as `auth_required` instead). Grok's real missing-session failure is covered by `session get failed` and `no session id or title matched "<id>" for this directory`.
 - Unknown-session classification (`isUnknownSession`) is always gated on failure evidence (`failedRun`), exactly like the `QUOTA_RE`/`AUTH_RE` checks; a successful, exit-0 run is never reclassified as `backend_failed` — and never triggers the session-drop retry — merely because stderr contains matching wording.
 - Supplying both `--brief-file` and a trailing/positional brief after `--` is always a usage error (exit 2, `failUsage`); the wrapper never silently picks one and discards the other.
 - `--dry-run` never spawns a child process and never writes a run directory; it prints exactly `{ command, cwd, timeoutSecs, mode, backend, model, worktree }` and exits 0. No environment variables are ever included in that output.
@@ -37,6 +45,8 @@
 | `--cwd` missing or relative | usage error | yes (exit 2) |
 | unknown `<backend>` | usage error | yes (exit 2) |
 | opencode without `--model` | usage error | yes (exit 2) |
+| claude without `--model` | usage error | yes (exit 2) |
+| `DELEGATE_DEPTH` ≥ `DELEGATE_MAX_DEPTH` | recursion_guard | yes (exit 2) |
 | `--worktree` with non-git `--cwd` | usage error | yes (exit 2) |
 | backend binary not found | not_installed | yes (exit 2) |
 | both `--brief-file` and a trailing/positional brief supplied | usage error | yes (exit 2) |
@@ -59,7 +69,10 @@
 | Kill sequence | SIGTERM, wait 5s, SIGKILL | not configurable |
 | Run directory | `${CLAUDE_PLUGIN_DATA:-~/.claude/plugins/data/delegate-model}/runs/<timestamp>-<backend>-<rand>`, mode 0700 | `--run-dir PATH` |
 | Worktree path | `<cwd>-wt-<NAME>` on branch `delegate/<NAME>` | not configurable |
-| Binary search path | `PATH` + `~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin` | not configurable |
+| Binary search path | `PATH` + `~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin` | `DELEGATE_NO_EXTRA_BIN_DIRS=1` searches PATH only |
+| Recursion depth | `DELEGATE_DEPTH` (default 0) | set on children to current+1 |
+| Recursion cap | `DELEGATE_MAX_DEPTH` default 1 | `DELEGATE_MAX_DEPTH` env |
+| Claude write budget | `--max-budget-usd 5` | `--extra-args` |
 | Brief source | trailing argv words after `--` | `--brief-file PATH` |
 | Extra backend flags | none | `--extra-args "…"`, shell-word-split and appended after all wrapper-owned flags |
 
@@ -67,7 +80,7 @@ Run directory files (non-dry-run only): `argv.json`, `stdin.txt`, `raw.log`, `te
 
 ## Access control
 
-Not applicable — this is a local single-user CLI wrapper, no auth boundary of its own. Each backend's own auth (`grok login`, `codex login`, `opencode providers login`) gates access to that backend.
+Not applicable — this is a local single-user CLI wrapper, no auth boundary of its own. Each backend's own auth (`grok login`, `codex login`, `opencode providers login`, `claude auth`) gates access to that backend.
 
 ## Known limitations
 
@@ -76,4 +89,4 @@ Not applicable — this is a local single-user CLI wrapper, no auth boundary of 
 
 ## Tests
 
-`bash plugins/delegate-model/tests/run.sh`, 23 cases, bash 3.2 compatible, backend CLIs mocked via `tests/mocks` on `PATH` (no network or real backend needed). See the wrapper feature doc's Tests section for the full list of case names.
+`bash plugins/delegate-model/tests/run.sh`, 55 cases as of 2026-09-13, bash 3.2 compatible, backend CLIs mocked via `tests/mocks` on `PATH` (no network or real backend needed). See the wrapper feature doc's Tests section for the full list of case names.
