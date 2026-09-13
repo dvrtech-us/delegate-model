@@ -4,6 +4,7 @@
 TESTS_DIR=$(cd "$(dirname "$0")" && pwd)
 PLUGIN_DIR=$(cd "$TESTS_DIR/.." && pwd)
 DELEGATE="$PLUGIN_DIR/scripts/delegate.js"
+ACP="$PLUGIN_DIR/scripts/acp.js"
 MOCKS="$TESTS_DIR/mocks"
 FIXTURES="$TESTS_DIR/fixtures"
 NODE=$(command -v node)
@@ -15,7 +16,7 @@ if [ -z "$NODE" ]; then
   exit 1
 fi
 
-chmod +x "$DELEGATE" "$MOCKS/grok" "$MOCKS/codex" "$MOCKS/opencode" "$MOCKS/claude" 2>/dev/null || true
+chmod +x "$DELEGATE" "$ACP" "$MOCKS/grok" "$MOCKS/codex" "$MOCKS/opencode" "$MOCKS/claude" "$MOCKS/acp-agent" 2>/dev/null || true
 
 PASS=0
 FAIL=0
@@ -106,6 +107,15 @@ with_mocks() {
   PATH="$MOCKS:$ORIG_PATH"
   DELEGATE_NO_EXTRA_BIN_DIRS=1
   export PATH DELEGATE_NO_EXTRA_BIN_DIRS
+}
+
+run_acp() {
+  local errfile="$TMPROOT/err.$$"
+  local outfile="$TMPROOT/out.$$"
+  "$NODE" "$ACP" "$@" >"$outfile" 2>"$errfile"
+  EC=$?
+  OUT=$(< "$outfile")
+  ERR=$(< "$errfile")
 }
 
 # ---------------------------------------------------------------------------
@@ -944,6 +954,167 @@ else
   fail "recursion_guard: DELEGATE_MAX_DEPTH=2 allows depth 1 / child depth+1" "exit=$EC out=$OUT"
 fi
 unset MOCK_SPAWN_MARKER MOCK_DEPTH_FILE
+
+# ---------------------------------------------------------------------------
+# acp.js
+# ---------------------------------------------------------------------------
+MOCK_BEHAVIOR=ok
+export MOCK_BEHAVIOR
+with_mocks
+
+run_acp --cwd "$PARSE_CWD" --agent acp-agent -- "hi"
+if [ "$EC" -eq 2 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "usage" ]; then pass "acp usage: missing --mode exits 2"; else fail "acp usage: missing --mode exits 2" "class=$cls out=$OUT"; fi
+else
+  fail "acp usage: missing --mode exits 2" "exit=$EC out=$OUT"
+fi
+
+run_acp --mode read --cwd "$PARSE_CWD" -- "hi"
+if [ "$EC" -eq 2 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "usage" ]; then pass "acp usage: missing --agent exits 2"; else fail "acp usage: missing --agent exits 2" "class=$cls out=$OUT"; fi
+else
+  fail "acp usage: missing --agent exits 2" "exit=$EC out=$OUT"
+fi
+
+run_acp --mode read --cwd "$PARSE_CWD" --agent acp-agent --model sonnet -- "hi"
+if [ "$EC" -eq 2 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "usage" ]; then pass "acp usage: --model is rejected"; else fail "acp usage: --model is rejected" "class=$cls out=$OUT"; fi
+else
+  fail "acp usage: --model is rejected" "exit=$EC out=$OUT"
+fi
+
+MARKER="$TMPROOT/spawned-acp"
+rm -f "$MARKER"
+MOCK_SPAWN_MARKER="$MARKER"
+export MOCK_SPAWN_MARKER
+run_acp --mode read --cwd "$PARSE_CWD" --agent acp-agent --dry-run -- "hi"
+if [ "$EC" -eq 0 ]; then
+  if [ -f "$MARKER" ]; then
+    fail "acp dry-run: no spawn" "mock spawned"
+  else
+    printf '%s' "$OUT" | "$NODE" -e '
+      const fs = require("fs");
+      const j = JSON.parse(fs.readFileSync(0, "utf8").slice(fs.readFileSync(0,"utf8").indexOf("{")));
+    ' 2>/dev/null
+    backend=$(json_field "$OUT" "backend")
+    agent=$(json_field "$OUT" "agent")
+    if [ "$backend" = "acp" ] && [ "$agent" = "acp-agent" ]; then
+      pass "acp dry-run: backend=acp agent=acp-agent, no spawn"
+    else
+      fail "acp dry-run: backend=acp agent=acp-agent, no spawn" "backend=$backend agent=$agent out=$OUT"
+    fi
+  fi
+else
+  fail "acp dry-run" "exit=$EC out=$OUT"
+fi
+unset MOCK_SPAWN_MARKER
+
+run_acp --mode read --cwd "$PARSE_CWD" --agent acp-agent --run-dir "$PARSE_RUN/acp-ok" -- "hi"
+if [ "$EC" -eq 0 ]; then
+  text=$(json_field "$OUT" "text")
+  sid=$(json_field "$OUT" "sessionId")
+  ok=$(json_field "$OUT" "ok")
+  if [ "$ok" = "true" ] && [ "$text" = "OK" ] && [ "$sid" = "acp-sess-1" ]; then
+    pass "acp parse: text=OK sessionId"
+  else
+    fail "acp parse: text=OK sessionId" "ok=$ok text=$text sid=$sid out=$OUT"
+  fi
+else
+  fail "acp parse: text=OK sessionId" "exit=$EC out=$OUT err=$ERR"
+fi
+
+run_acp --mode read --cwd "$PARSE_CWD" --agent acp-agent --session load-ok --run-dir "$PARSE_RUN/acp-load" -- "hi"
+if [ "$EC" -eq 0 ]; then
+  text=$(json_field "$OUT" "text")
+  if [ "$text" = "OK" ]; then
+    pass "acp session/load: stale STALE_HISTORY is not the answer"
+  else
+    fail "acp session/load: stale STALE_HISTORY is not the answer" "text=$text out=$OUT"
+  fi
+else
+  fail "acp session/load: stale history discarded" "exit=$EC out=$OUT err=$ERR"
+fi
+
+run_acp --mode read --cwd "$PARSE_CWD" --agent acp-agent --session missing-sess --run-dir "$PARSE_RUN/acp-sess-retry" -- "hi"
+if [ "$EC" -eq 0 ]; then
+  retried=$(json_field "$OUT" "sessionRetried")
+  text=$(json_field "$OUT" "text")
+  if [ "$retried" = "true" ] && [ "$text" = "OK" ]; then
+    pass "acp unknown session retries without --session"
+  else
+    fail "acp unknown session retries without --session" "sessionRetried=$retried text=$text out=$OUT"
+  fi
+else
+  fail "acp unknown session retries without --session" "exit=$EC out=$OUT err=$ERR"
+fi
+
+MOCK_BEHAVIOR=ask
+export MOCK_BEHAVIOR
+run_acp --mode read --cwd "$PARSE_CWD" --agent acp-agent --run-dir "$PARSE_RUN/acp-ask-read" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "backend_failed" ] || [ "$cls" = "permission_denied" ] || [ "$cls" = "empty_final_message" ]; then
+    pass "acp read: permission reject does not approve the write"
+  else
+    fail "acp read: permission reject does not approve the write" "class=$cls out=$OUT"
+  fi
+else
+  fail "acp read: permission reject does not approve the write" "exit=$EC out=$OUT err=$ERR"
+fi
+
+run_acp --mode write --cwd "$PARSE_CWD" --agent acp-agent --run-dir "$PARSE_RUN/acp-ask-write" -- "hi"
+if [ "$EC" -eq 0 ]; then
+  text=$(json_field "$OUT" "text")
+  if [ "$text" = "OK" ]; then
+    pass "acp write: permission allow_once proceeds"
+  else
+    fail "acp write: permission allow_once proceeds" "text=$text out=$OUT"
+  fi
+else
+  fail "acp write: permission allow_once proceeds" "exit=$EC out=$OUT err=$ERR"
+fi
+
+MOCK_BEHAVIOR=touch_file
+export MOCK_BEHAVIOR
+ACP_GIT="$TMPROOT/acp-git"
+mkdir -p "$ACP_GIT"
+git -C "$ACP_GIT" init -q
+git -C "$ACP_GIT" config user.email t@t
+git -C "$ACP_GIT" config user.name t
+printf 'x\n' > "$ACP_GIT/keep.txt"
+git -C "$ACP_GIT" add keep.txt
+git -C "$ACP_GIT" commit -qm init
+run_acp --mode read --cwd "$ACP_GIT" --agent acp-agent --run-dir "$PARSE_RUN/acp-dirty-read" -- "hi"
+if [ "$EC" -eq 1 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "read_mode_violated" ]; then
+    pass "acp read: dirty tree is read_mode_violated"
+  else
+    fail "acp read: dirty tree is read_mode_violated" "class=$cls out=$OUT"
+  fi
+else
+  fail "acp read: dirty tree is read_mode_violated" "exit=$EC out=$OUT err=$ERR"
+fi
+
+MOCK_BEHAVIOR=ok
+export MOCK_BEHAVIOR
+DELEGATE_DEPTH=1 run_acp --mode read --cwd "$PARSE_CWD" --agent acp-agent -- "hi"
+if [ "$EC" -eq 2 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "recursion_guard" ]; then
+    pass "acp recursion_guard: DELEGATE_DEPTH=1 exits 2"
+  else
+    fail "acp recursion_guard: DELEGATE_DEPTH=1 exits 2" "class=$cls out=$OUT"
+  fi
+else
+  fail "acp recursion_guard: DELEGATE_DEPTH=1 exits 2" "exit=$EC out=$OUT"
+fi
+
+MOCK_BEHAVIOR=ok
+export MOCK_BEHAVIOR
 
 # ---------------------------------------------------------------------------
 # ok / exit-code invariant

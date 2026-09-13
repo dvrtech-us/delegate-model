@@ -6,27 +6,57 @@
  * Node >= 18, zero dependencies. Always prints one JSON envelope on stdout.
  */
 
-const { spawn, spawnSync } = require('child_process');
-const crypto = require('crypto');
-const fs = require('fs');
 const http = require('http');
 const https = require('https');
-const os = require('os');
-const path = require('path');
+const lib = require('./lib');
+
+const {
+  spawn,
+  spawnSync,
+  fs,
+  os,
+  path,
+  TEXT_LIMIT,
+  KILL_GRACE_MS,
+  DEFAULT_TIMEOUT_SECS,
+  AUTH_RE,
+  QUOTA_RE,
+  UNKNOWN_SESSION_RE,
+  recursionDepth,
+  maxRecursionDepth,
+  childEnv,
+  nowStamp,
+  randHex,
+  findBinary,
+  splitShellWords,
+  clipText,
+  tailLines,
+  isEmptyText,
+  mkdir0700,
+  emit,
+  baseEnvelope,
+  failUsage,
+  takeValue,
+  captureGitStatus,
+  ensureWorktree,
+  killProcessTree,
+  forceKillProcessTree,
+  setActiveChild,
+  getActiveChild,
+  appendRaw,
+  writeRunFiles,
+} = lib;
+
+lib.setUsageText(() =>
+  [
+    'Usage: delegate.js <grok|codex|opencode|claude> --mode read|write --cwd /abs [options] [-- brief]',
+    'Options: --model ID --session ID --worktree [NAME] --timeout SECS --brief-file PATH',
+    '         --extra-args "…" --dry-run --run-dir PATH',
+  ].join('\n')
+);
 
 const BACKENDS = new Set(['grok', 'codex', 'opencode', 'claude']);
-const TEXT_LIMIT = 20000;
-const KILL_GRACE_MS = 5000;
-const DEFAULT_TIMEOUT_SECS = 1800;
-const DEFAULT_MAX_DEPTH = 1;
 const CLAUDE_WRITE_BUDGET_USD = '5';
-const EXTRA_BIN_DIRS = [
-  path.join(os.homedir(), '.grok', 'bin'),
-  path.join(os.homedir(), '.local', 'bin'),
-  path.join(os.homedir(), '.opencode', 'bin'),
-  '/usr/local/bin',
-  '/opt/homebrew/bin',
-];
 const INSTALL_HINT = {
   grok: 'Install the grok CLI and ensure it is on PATH (https://x.ai).',
   codex: 'Install the Codex CLI: https://github.com/openai/codex',
@@ -43,137 +73,8 @@ const GROK_DEFAULT_MODEL = 'grok-composer-2.5-fast';
 const OPENCODE_READ_PREFIX =
   '[READ-ONLY] Do not edit, write, create, or delete files. Do not run commands that change state. Answer from inspection only.\n\n';
 
-const AUTH_RE = /unauthorized|\b401\b|not authenticated|api key|\blogin\b/i;
-const QUOTA_RE = /\b429\b|rate limit|quota|out of credits/i;
-const UNKNOWN_SESSION_RE = /unknown session|invalid session|session not found|no rollout found|session get failed|no session id or title matched/i;
-
-let emitted = false;
-let activeChild = null;
-
-function usageText() {
-  return [
-    'Usage: delegate.js <grok|codex|opencode|claude> --mode read|write --cwd /abs [options] [-- brief]',
-    'Options: --model ID --session ID --worktree [NAME] --timeout SECS --brief-file PATH',
-    '         --extra-args "…" --dry-run --run-dir PATH',
-  ].join('\n');
-}
-
-function recursionDepth() {
-  const n = Number(process.env.DELEGATE_DEPTH);
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
-function maxRecursionDepth() {
-  const n = Number(process.env.DELEGATE_MAX_DEPTH);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_DEPTH;
-}
-
-function childEnv() {
-  const env = Object.assign({}, process.env);
-  env.DELEGATE_DEPTH = String(recursionDepth() + 1);
-  return env;
-}
-
-function extraBinDirs() {
-  if (process.env.DELEGATE_NO_EXTRA_BIN_DIRS === '1') return [];
-  return EXTRA_BIN_DIRS;
-}
-
 function usesStdinBrief(backend) {
   return backend === 'codex';
-}
-
-function nowStamp() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  return (
-    `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}T` +
-    `${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`
-  );
-}
-
-function randHex(n) {
-  return crypto.randomBytes(n).toString('hex');
-}
-
-function isExecutableFile(file) {
-  try {
-    const st = fs.statSync(file);
-    if (!st.isFile()) return false;
-    if (process.platform === 'win32') return true;
-    return (st.mode & 0o111) !== 0;
-  } catch {
-    return false;
-  }
-}
-
-function findBinary(name) {
-  const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  const dirs = pathDirs.concat(extraBinDirs());
-  const seen = new Set();
-  for (const dir of dirs) {
-    if (seen.has(dir)) continue;
-    seen.add(dir);
-    const candidate = path.join(dir, name);
-    if (isExecutableFile(candidate)) return candidate;
-  }
-  return null;
-}
-
-function splitShellWords(str) {
-  if (!str) return [];
-  const out = [];
-  let cur = '';
-  let quote = null;
-  let escape = false;
-  for (const ch of str) {
-    if (escape) {
-      cur += ch;
-      escape = false;
-      continue;
-    }
-    if (ch === '\\' && quote !== "'") {
-      escape = true;
-      continue;
-    }
-    if (quote) {
-      if (ch === quote) quote = null;
-      else cur += ch;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (/\s/.test(ch)) {
-      if (cur.length) {
-        out.push(cur);
-        cur = '';
-      }
-      continue;
-    }
-    cur += ch;
-  }
-  if (escape) cur += '\\';
-  if (cur.length) out.push(cur);
-  return out;
-}
-
-function clipText(text) {
-  const s = text == null ? '' : String(text);
-  if (s.length <= TEXT_LIMIT) return { text: s, truncated: false };
-  return { text: s.slice(0, TEXT_LIMIT), truncated: true };
-}
-
-function tailLines(s, n) {
-  if (!s) return '';
-  const lines = String(s).split(/\r?\n/);
-  if (lines.length && lines[lines.length - 1] === '') lines.pop();
-  return lines.slice(-n).join('\n');
-}
-
-function isEmptyText(t) {
-  return !String(t || '').trim();
 }
 
 function parseJsonc(raw) {
@@ -221,76 +122,6 @@ function readFileIfExists(p) {
   } catch {
     return null;
   }
-}
-
-function mkdir0700(dir) {
-  fs.mkdirSync(dir, { recursive: true });
-  try {
-    fs.chmodSync(dir, 0o700);
-  } catch {
-    /* umask / platform */
-  }
-}
-
-function emit(envelope, code) {
-  if (emitted) {
-    process.exit(code);
-    return;
-  }
-  emitted = true;
-  process.stdout.write(JSON.stringify(envelope, null, 2) + '\n');
-  process.exit(code);
-}
-
-function baseEnvelope(partial) {
-  return Object.assign(
-    {
-      ok: false,
-      backend: null,
-      mode: null,
-      model: null,
-      cwd: null,
-      worktree: null,
-      command: [],
-      exitCode: null,
-      timedOut: false,
-      durationMs: 0,
-      text: '',
-      textTruncated: false,
-      textFile: null,
-      sessionId: null,
-      usage: null,
-      costUsd: null,
-      emptyRetried: false,
-      sessionRetried: false,
-      gitStatus: null,
-      stderrTail: '',
-      rawLog: null,
-      error: null,
-    },
-    partial
-  );
-}
-
-function failUsage(message, extra) {
-  emit(
-    baseEnvelope(
-      Object.assign(
-        {
-          error: { class: 'usage', message, hint: usageText() },
-          exitCode: 2,
-        },
-        extra || {}
-      )
-    ),
-    2
-  );
-}
-
-function takeValue(argv, i, eqVal) {
-  if (eqVal !== undefined && eqVal !== '') return { value: eqVal, next: i };
-  if (i >= argv.length) return { value: null, next: i, missing: true };
-  return { value: argv[i], next: i + 1 };
 }
 
 function parseCli(argv) {
@@ -422,114 +253,6 @@ function parseCli(argv) {
   return opts;
 }
 
-function git(cwd, gitArgs, timeoutMs) {
-  return spawnSync('git', ['-C', cwd].concat(gitArgs), {
-    encoding: 'utf8',
-    timeout: timeoutMs || 15000,
-    env: process.env,
-  });
-}
-
-function isGitRepo(cwd) {
-  const r = git(cwd, ['rev-parse', '--is-inside-work-tree'], 8000);
-  return r.status === 0 && String(r.stdout || '').trim() === 'true';
-}
-
-function captureGitStatus(cwd) {
-  const r = git(cwd, ['status', '--short'], 15000);
-  if (r.status !== 0) return '';
-  return r.stdout || '';
-}
-
-function ensureWorktree(cwd, name) {
-  if (!isGitRepo(cwd)) {
-    return { error: { class: 'usage', message: `--cwd is not a git repository (required for --worktree)`, hint: 'pass a git checkout as --cwd' } };
-  }
-  const wtPath = `${cwd}-wt-${name}`;
-  const branch = `delegate/${name}`;
-  if (fs.existsSync(wtPath)) {
-    return { path: wtPath, branch, created: false };
-  }
-  const branchExists = git(cwd, ['rev-parse', '--verify', '--quiet', branch], 8000);
-  let add;
-  if (branchExists.status === 0) {
-    add = git(cwd, ['worktree', 'add', wtPath, branch], 30000);
-  } else {
-    add = git(cwd, ['worktree', 'add', '-b', branch, wtPath], 30000);
-  }
-  if (add.status !== 0) {
-    const msg = String(add.stderr || add.stdout || 'git worktree add failed').trim();
-    return { error: { class: 'usage', message: msg, hint: 'check git worktree add output' } };
-  }
-  return { path: wtPath, branch, created: true };
-}
-
-function killProcessTree(child) {
-  if (!child || child.pid == null) return;
-  if (process.platform === 'win32') {
-    try {
-      child.kill();
-    } catch {
-      /* ignore */
-    }
-    return;
-  }
-  try {
-    process.kill(-child.pid, 'SIGTERM');
-  } catch {
-    try {
-      child.kill('SIGTERM');
-    } catch {
-      /* ignore */
-    }
-  }
-}
-
-function forceKillProcessTree(child) {
-  if (!child || child.pid == null) return;
-  if (process.platform === 'win32') {
-    try {
-      child.kill();
-    } catch {
-      /* ignore */
-    }
-    return;
-  }
-  try {
-    process.kill(-child.pid, 'SIGKILL');
-  } catch {
-    try {
-      child.kill('SIGKILL');
-    } catch {
-      /* ignore */
-    }
-  }
-}
-
-function killActiveChildGroup() {
-  if (!activeChild) return;
-  killProcessTree(activeChild);
-  forceKillProcessTree(activeChild);
-}
-
-process.on('SIGTERM', () => {
-  killActiveChildGroup();
-  process.exit(143);
-});
-process.on('SIGINT', () => {
-  killActiveChildGroup();
-  process.exit(130);
-});
-
-function appendRaw(rawLogPath, tag, chunk) {
-  if (!rawLogPath) return;
-  try {
-    fs.appendFileSync(rawLogPath, `[${tag}] ${chunk}`);
-  } catch {
-    /* ignore */
-  }
-}
-
 function runCommand({ bin, args, cwd, stdinData, timeoutMs, rawLogPath }) {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -544,7 +267,7 @@ function runCommand({ bin, args, cwd, stdinData, timeoutMs, rawLogPath }) {
     const finish = (exitCode, signal) => {
       if (settled) return;
       settled = true;
-      if (activeChild === child) activeChild = null;
+      if (getActiveChild() === child) setActiveChild(null);
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (sigkillTimer) clearTimeout(sigkillTimer);
       resolve({
@@ -573,7 +296,7 @@ function runCommand({ bin, args, cwd, stdinData, timeoutMs, rawLogPath }) {
       finish(1, null);
       return;
     }
-    activeChild = child;
+    setActiveChild(child);
 
     child.stdout.on('data', (buf) => {
       const s = buf.toString();
@@ -1129,14 +852,6 @@ function resolvedModel(backend, model) {
   if (backend === 'grok') return grokResolvedModel(model);
   if (model) return model;
   return null;
-}
-
-function writeRunFiles(runDir, { argv, brief, envelope, text }) {
-  mkdir0700(runDir);
-  fs.writeFileSync(path.join(runDir, 'argv.json'), JSON.stringify(argv, null, 2) + '\n');
-  fs.writeFileSync(path.join(runDir, 'stdin.txt'), brief == null ? '' : String(brief));
-  fs.writeFileSync(path.join(runDir, 'text.md'), text == null ? '' : String(text));
-  fs.writeFileSync(path.join(runDir, 'envelope.json'), JSON.stringify(envelope, null, 2) + '\n');
 }
 
 async function main() {

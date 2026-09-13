@@ -2,7 +2,7 @@
 
 ## What it does
 
-Five skills ship in the plugin: `grok`, `codex`, `opencode`, `claude` (one per backend), and `delegate` (a router used only when the user has not named a backend). Each is model-invoked and also user-invocable directly as `/delegate-model:<name>`.
+Six skills ship in the plugin: `grok`, `codex`, `opencode`, `claude` (one per first-class CLI), `acp` (ACP launch file, only when ACP or an ACP-only agent is named), and `delegate` (a router used only when the user has not named a backend; it never selects ACP). Each is model-invoked and also user-invocable directly as `/delegate-model:<name>`.
 
 ## User flow
 
@@ -16,7 +16,7 @@ Five skills ship in the plugin: `grok`, `codex`, `opencode`, `claude` (one per b
 
 Each backend skill's frontmatter `description` carries the trigger phrases and names its backend explicitly, so skill selection by phrase match routes directly to the right backend without going through the router. The router's `description` is scoped to trigger only when no backend is named in the request, to avoid it intercepting requests that already name a backend.
 
-All five skill bodies instruct the host to invoke the shared wrapper (see the `wrapper` feature) rather than the raw backend CLI, and never to construct backend-specific flags themselves.
+The four CLI backend skills plus the router instruct the host to invoke `scripts/delegate.js`. The `acp` skill instructs the host to invoke `scripts/acp.js`. Neither path calls a raw agent CLI with host-constructed flags.
 
 ## Key files
 
@@ -26,7 +26,8 @@ All five skill bodies instruct the host to invoke the shared wrapper (see the `w
 | `plugins/delegate-model/skills/codex/SKILL.md` | Codex backend skill |
 | `plugins/delegate-model/skills/opencode/SKILL.md` | opencode backend skill |
 | `plugins/delegate-model/skills/claude/SKILL.md` | Claude Code backend skill |
-| `plugins/delegate-model/skills/delegate/SKILL.md` | Router skill, unnamed requests only |
+| `plugins/delegate-model/skills/acp/SKILL.md` | ACP sibling launch file; named ACP requests only |
+| `plugins/delegate-model/skills/delegate/SKILL.md` | Router skill, unnamed requests only; never picks ACP |
 
 ## Integration points
 

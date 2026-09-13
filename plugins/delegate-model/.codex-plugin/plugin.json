@@ -1,0 +1,6 @@
+{
+  "name": "delegate-model",
+  "version": "1.0.0",
+  "description": "Delegate scoped tasks to local Grok, Codex, OpenCode, or Claude Code CLIs, or to an ACP-speaking agent via acp.js.",
+  "skills": "./skills/"
+}

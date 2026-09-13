@@ -16,7 +16,7 @@ A single Node script that invokes one of four local CLI agents (Grok, Codex, ope
 
 ### Entry point
 
-`plugins/delegate-model/scripts/delegate.js`, invoked as `node delegate.js <backend> [flags] -- <brief>`. Zero npm dependencies; uses only Node's `child_process`, `crypto`, `fs`, `http`, `https`, `os`, `path`. JSONL/NDJSON output is parsed by splitting on newlines and calling `JSON.parse` per line, not `readline`.
+`plugins/delegate-model/scripts/delegate.js`, invoked as `node delegate.js <backend> [flags] -- <brief>`. Shared primitives (envelope, worktree, recursion, findBinary, process-group kill) live in `plugins/delegate-model/scripts/lib.js`. Zero npm dependencies; uses only Node's `child_process`, `crypto`, `fs`, `http`, `https`, `os`, `path`. JSONL/NDJSON output is parsed by splitting on newlines and calling `JSON.parse` per line, not `readline`. ACP is a sibling launch file (`scripts/acp.js`), not a backend of this wrapper.
 
 ### Phases
 
@@ -219,7 +219,7 @@ None.
 
 Run with `bash plugins/delegate-model/tests/run.sh` from the repo root. Bash 3.2 compatible; puts `tests/mocks` first on `PATH` so no real backend CLI or network access is required. Prints one `PASS:`/`FAIL:` line per case plus a final `<n> passed, <n> failed` summary, and exits non-zero if anything failed.
 
-55 cases as of 2026-09-13, in run order. Additions beyond the original 23 include grok streaming-parse regressions (F1–F5), `--brief-file` conflict, the claude backend, `DELEGATE_NO_EXTRA_BIN_DIRS`, and `recursion_guard`.
+66 cases as of 2026-09-13, in run order. Additions beyond the original 23 include grok streaming-parse regressions (F1–F5), `--brief-file` conflict, the claude backend, `DELEGATE_NO_EXTRA_BIN_DIRS`, and `recursion_guard`.
 
 | # | Test name |
 |---|---|

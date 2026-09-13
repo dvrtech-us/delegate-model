@@ -1,0 +1,119 @@
+#!/usr/bin/env node
+'use strict';
+
+const lib = require('./_lib');
+const readline = require('readline');
+
+lib.markSpawned();
+const b = lib.resolveBehavior();
+
+if (b === 'hang') {
+  lib.hang();
+  return;
+}
+
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+let sessionId = 'acp-sess-1';
+let pendingPromptId = null;
+
+function send(obj) {
+  process.stdout.write(JSON.stringify(obj) + '\n');
+}
+
+function notifyUpdate(update) {
+  send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update } });
+}
+
+rl.on('line', (line) => {
+  const t = line.trim();
+  if (!t) return;
+  let msg;
+  try {
+    msg = JSON.parse(t);
+  } catch {
+    return;
+  }
+  const { id, method, params } = msg;
+  if (method === 'initialize') {
+    send({
+      jsonrpc: '2.0',
+      id,
+      result: {
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: true },
+        authMethods: [{ id: 'oauth', name: 'OAuth' }],
+        agentInfo: { name: 'acp-agent-mock', version: '0.0.0' },
+      },
+    });
+    return;
+  }
+  if (method === 'session/new') {
+    sessionId = 'acp-sess-1';
+    send({ jsonrpc: '2.0', id, result: { sessionId } });
+    return;
+  }
+  if (method === 'session/load') {
+    const want = params && params.sessionId;
+    if (want && want !== 'acp-sess-1' && want !== 'load-ok') {
+      send({ jsonrpc: '2.0', id, error: { code: -32602, message: 'unknown session' } });
+      return;
+    }
+    sessionId = want || sessionId;
+    notifyUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'STALE_HISTORY' },
+    });
+    send({ jsonrpc: '2.0', id, result: { sessionId } });
+    return;
+  }
+  if (method === 'session/cancel') {
+    const p = process.env.MOCK_CANCEL_FILE;
+    if (p) lib.fs.writeFileSync(p, 'cancelled\n');
+    return;
+  }
+  if (method === 'session/prompt') {
+    if (b === 'empty') {
+      send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
+      return;
+    }
+    if (b === 'ask') {
+      pendingPromptId = id;
+      send({
+        jsonrpc: '2.0',
+        id: 9000,
+        method: 'session/request_permission',
+        params: {
+          sessionId,
+          toolCall: { toolCallId: 'call_1', title: 'Write file', kind: 'edit' },
+          options: [
+            { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+            { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
+          ],
+        },
+      });
+      return;
+    }
+    if (b === 'touch_file') {
+      lib.touchInCwd([]);
+    }
+    notifyUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'OK' },
+    });
+    send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
+    return;
+  }
+  if (id === 9000 && msg.result && pendingPromptId != null) {
+    const optionId = msg.result.outcome && msg.result.outcome.optionId;
+    if (optionId === 'allow-once') {
+      notifyUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'OK' },
+      });
+      send({ jsonrpc: '2.0', id: pendingPromptId, result: { stopReason: 'end_turn' } });
+    } else {
+      send({ jsonrpc: '2.0', id: pendingPromptId, result: { stopReason: 'refusal' } });
+    }
+    pendingPromptId = null;
+  }
+});

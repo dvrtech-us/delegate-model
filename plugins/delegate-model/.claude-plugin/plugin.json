@@ -2,10 +2,10 @@
   "name": "delegate-model",
   "displayName": "Delegate Model",
   "version": "1.0.0",
-  "description": "Delegate scoped tasks to local Grok, Codex, OpenCode, or Claude Code CLIs through one tested wrapper. Use when asked to ask grok/codex/opencode/claude, get a second opinion from another model, or offload a contained research or code task to a peer agent.",
+  "description": "Delegate scoped tasks to local Grok, Codex, OpenCode, or Claude Code CLIs, or to an ACP-speaking agent via acp.js. Use when asked to ask grok/codex/opencode/claude, run something over ACP, get a second opinion from another model, or offload a contained research or code task to a peer agent.",
   "author": { "name": "DVRTech", "url": "https://github.com/dvrtech-us" },
   "homepage": "https://github.com/dvrtech-us/delegate-model",
   "repository": "https://github.com/dvrtech-us/delegate-model",
   "license": "MIT",
-  "keywords": ["delegate", "grok", "codex", "opencode", "claude", "multi-model", "second-opinion"]
+  "keywords": ["delegate", "grok", "codex", "opencode", "claude", "acp", "multi-model", "second-opinion"]
 }

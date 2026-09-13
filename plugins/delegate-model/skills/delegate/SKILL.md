@@ -5,7 +5,7 @@ description: Route a scoped task to whichever local peer agent (Grok, Codex, ope
 
 # Delegate (router)
 
-This skill only applies when the user has **not** named a backend. If they said "ask grok" or "have codex review this" or "ask claude," go straight to the `grok`, `codex`, `opencode`, or `claude` skill — do not route through here.
+This skill only applies when the user has **not** named a backend. If they said "ask grok" or "have codex review this" or "ask claude," go straight to the `grok`, `codex`, `opencode`, or `claude` skill — do not route through here. If they named ACP or an ACP-only agent, go straight to the `acp` skill (`scripts/acp.js`). ACP is **never** a choice in the table below.
 
 ## Choosing a backend
 
@@ -28,4 +28,4 @@ Pick the first backend in the row that matches the task. If that backend fails p
 3. Follow that backend's own skill (`grok`, `codex`, `opencode`, or `claude`) for the actual invocation contract, brief-writing guidance, envelope fields, and troubleshooting.
 4. Always tell the user which backend you chose and why, before or alongside the result.
 
-Never invent a sixth invocation path (no raw CLI calls, no MCP server, no flags not documented in the backend skills). This skill only decides *which* of the four to use; it does not define its own wrapper contract.
+Never invent a sixth invocation path (no raw CLI calls, no MCP server, no flags not documented in the backend skills). This skill only decides *which* of the four first-class backends to use. ACP is a separate launch file (`scripts/acp.js`) and is never selected here.

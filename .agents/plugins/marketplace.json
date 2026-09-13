@@ -1,0 +1,20 @@
+{
+  "name": "delegate-model",
+  "interface": {
+    "displayName": "Delegate Model"
+  },
+  "plugins": [
+    {
+      "name": "delegate-model",
+      "source": {
+        "source": "local",
+        "path": "./plugins/delegate-model"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

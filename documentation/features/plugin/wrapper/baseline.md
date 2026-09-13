@@ -89,4 +89,4 @@ Not applicable — this is a local single-user CLI wrapper, no auth boundary of 
 
 ## Tests
 
-`bash plugins/delegate-model/tests/run.sh`, 55 cases as of 2026-09-13, bash 3.2 compatible, backend CLIs mocked via `tests/mocks` on `PATH` (no network or real backend needed). See the wrapper feature doc's Tests section for the full list of case names.
+`bash plugins/delegate-model/tests/run.sh`, 66 cases as of 2026-09-13 (includes ACP client cases), bash 3.2 compatible, backend CLIs mocked via `tests/mocks` on `PATH` (no network or real backend needed). See the wrapper feature doc's Tests section for the full list of case names.
