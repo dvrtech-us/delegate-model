@@ -2,12 +2,12 @@
 
 ## What it does
 
-A single Node script that invokes one of three local CLI agents (Grok, Codex, opencode) as a one-shot subprocess, parses its output into a common envelope, and applies shared retry, timeout, and worktree behavior. Claude calls this script instead of the backend CLIs directly, so flag correctness and output parsing are code, not per-call prose.
+A single Node script that invokes one of four local CLI agents (Grok, Codex, opencode, Claude Code) as a one-shot subprocess, parses its output into a common envelope, and applies shared retry, timeout, worktree, and recursion-guard behavior. The host agent calls this script instead of the backend CLIs directly, so flag correctness and output parsing are code, not per-call prose.
 
 ## User flow
 
-1. Claude decides a task should go to a specific backend (via the `grok`, `codex`, or `opencode` skill) or an unnamed one (via the `delegate` router skill).
-2. Claude runs `node "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.js" <backend> --mode read|write --cwd /abs/path [options] -- "brief"`.
+1. The host decides a task should go to a specific backend (via the `grok`, `codex`, `opencode`, or `claude` skill) or an unnamed one (via the `delegate` router skill).
+2. The host runs `node "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.js" <backend> --mode read|write --cwd /abs/path [options] -- "brief"`.
 3. The wrapper resolves the backend argv, optionally creates or reuses a git worktree, spawns the backend CLI with the brief on stdin (or as a single argv element where stdin isn't supported), and enforces a timeout.
 4. The wrapper parses backend-specific output into a common JSON envelope and prints exactly one JSON object to stdout.
 5. Claude reads the envelope's `ok`, `error.class`, `text`, and `gitStatus` fields and reports back to the user.
@@ -20,15 +20,16 @@ A single Node script that invokes one of three local CLI agents (Grok, Codex, op
 
 ### Phases
 
-1. **Argument parsing.** `<backend>` must be one of `grok | codex | opencode`. `--mode` and `--cwd` are required; missing either is exit code 2. `--cwd` must be absolute; relative is exit code 2. `opencode` additionally requires `--model`; missing is exit code 2.
-2. **Preflight.** Locate the backend binary on `PATH` plus known install directories (`~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin`). Missing binary is exit code 2 with `error.class: "not_installed"`. For opencode, additionally attempt (best effort, short timeout) to confirm the `plan` agent exists and, when `--model` looks like a local provider (`lmstudio/`, `ollama/`), that its base URL is reachable.
-3. **Worktree setup** (if `--worktree NAME` given). Requires `--cwd` to be a git repo, else exit code 2. Creates or reuses a sibling worktree at `<cwd>-wt-<NAME>` on branch `delegate/<NAME>`. The effective working directory for the backend becomes the worktree path.
-4. **Argv construction.** Backend-specific flags are assembled per the read/write mode table below. The brief is passed on stdin where the backend supports it (Codex), otherwise as a single argv element (Grok, opencode) — never through a shell.
-5. **Spawn and timeout.** `child_process.spawn` with an argv array (no shell interpolation). Default timeout is `--timeout` or `DELEGATE_TIMEOUT_SECS` or 1800 seconds. On timeout: SIGTERM, wait 5s, then SIGKILL.
-6. **Output capture.** stdout/stderr interleaved into a run-scoped raw log with stream tags. For grok's `streaming-messages-json` output, `raw.log` now contains full `tool_result` payloads per streamed line (not just the final result), and stdout is accumulated in memory for the duration of the run, so grok runs produce a larger `raw.log` and use more memory than under the old buffered `json` format. This is an accepted tradeoff for observability: the old format emitted nothing until the process exited, making a long-running grok call indistinguishable from a hang.
-7. **Parsing**, backend-specific (see below).
-8. **Retry rules**, applied after parsing (see below).
-9. **Envelope emission.** One JSON object to stdout, always, whether `ok` is true or false.
+1. **Argument parsing.** `<backend>` must be one of `grok | codex | opencode | claude`. `--mode` and `--cwd` are required; missing either is exit code 2. `--cwd` must be absolute; relative is exit code 2. `opencode` and `claude` additionally require `--model`; missing is exit code 2.
+2. **Recursion guard.** If `Number(process.env.DELEGATE_DEPTH) || 0` is ≥ `DELEGATE_MAX_DEPTH` (default 1), emit `error.class: "recursion_guard"` and exit 2 before any worktree, spawn, or run directory. This fires on dry-run too.
+3. **Preflight.** Locate the backend binary on `PATH` plus known install directories (`~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin`), unless `DELEGATE_NO_EXTRA_BIN_DIRS=1` is set, in which case only `PATH` is searched. Missing binary is exit code 2 with `error.class: "not_installed"`. For opencode, additionally attempt (best effort, short timeout) to confirm the `plan` agent exists and, when `--model` looks like a local provider (`lmstudio/`, `ollama/`), that its base URL is reachable.
+4. **Worktree setup** (if `--worktree NAME` given). Requires `--cwd` to be a git repo, else exit code 2. Creates or reuses a sibling worktree at `<cwd>-wt-<NAME>` on branch `delegate/<NAME>`. The effective working directory for the backend becomes the worktree path.
+5. **Argv construction.** Backend-specific flags are assembled per the read/write mode table below. The brief is passed on stdin where the backend supports it (Codex only; `usesStdinBrief`), otherwise as a single argv element (Grok, opencode, Claude) — never through a shell.
+6. **Spawn and timeout.** `child_process.spawn` with an argv array (no shell interpolation). The child environment is a copy of `process.env` with `DELEGATE_DEPTH` set to the current depth plus one. Default timeout is `--timeout` or `DELEGATE_TIMEOUT_SECS` or 1800 seconds. On timeout: SIGTERM, wait 5s, then SIGKILL.
+7. **Output capture.** stdout/stderr interleaved into a run-scoped raw log with stream tags. For grok's `streaming-messages-json` output (and Claude's `stream-json`), `raw.log` now contains full `tool_result` payloads per streamed line (not just the final result), and stdout is accumulated in memory for the duration of the run, so those runs produce a larger `raw.log` and use more memory than under a buffered `json` format. This is an accepted tradeoff for observability: the old format emitted nothing until the process exited, making a long-running call indistinguishable from a hang.
+8. **Parsing**, backend-specific (see below).
+9. **Retry rules**, applied after parsing (see below).
+10. **Envelope emission.** One JSON object to stdout, always, whether `ok` is true or false.
 
 ### Options
 
@@ -49,6 +50,7 @@ Beyond `--mode`, `--cwd`, `--model`, `--session`, `--worktree [NAME]`, and `--dr
 | grok | `-p BRIEF --permission-mode dontAsk --deny Write --deny Edit --deny Bash --deny mcp__* --no-subagents` | `-p BRIEF --always-approve --max-turns 120` | `--cwd CWD --output-format streaming-messages-json`; `-m MODEL` if given; `-r SESSION` if given |
 | codex | `-s read-only` | `-s workspace-write` | `exec -C CWD --skip-git-repo-check --json -o <run-dir>/last.txt -s MODE [-m MODEL] [resume ID] -` (brief on stdin); the `exec` options come before the `resume` subcommand, and `resume ID` only appears when `--session` is given |
 | opencode | `--agent plan --auto` plus a read-only instruction prefix on the brief | `--auto` | `run --format json --dir CWD -m MODEL`; `-s SESSION` if given |
+| claude | `-p BRIEF --permission-mode dontAsk --permission-prompts none --tools Read,Grep,Glob` | `-p BRIEF --permission-mode bypassPermissions --permission-prompts none --max-budget-usd 5` | `--model MODEL --output-format stream-json --verbose --safe-mode --disable-slash-commands`; `--resume SESSION` if given. **No `--cwd` in argv** — working directory is the spawn `cwd`. Never `--bare`, `--max-turns`, `acceptEdits`, or Claude's own `-w`. |
 
 The wrapper never emits `--permission-mode acceptEdits` for Grok on any mode — that flag gates shell tools without gating edits, which strands a headless run before it can write. Grok's write posture is always `--always-approve`. Grok read mode also denies `mcp__*` (all MCP tools) and passes `--no-subagents`, so a read-mode Grok run cannot call MCP tools or spawn subagents.
 
@@ -59,6 +61,7 @@ The full grok read argv is `-p BRIEF --permission-mode dontAsk --deny Write --de
 | Backend | Output shape | Extraction |
 |---|---|---|
 | grok | Streaming NDJSON (`streaming-messages-json`); terminal event resolved by stream order, with an incomplete-stream parse-failure path and a flat-`json` fallback used only when no streaming event was seen at all | See below |
+| claude | Streaming NDJSON (`stream-json`); same terminal-event path as grok (`claudeParse` calls `grokParse` with `zeroCostMeansNull: false`) | `text` from the last `type: result` line's `result`; `sessionId` from `session_id`; `costUsd` is the wire `total_cost_usd` including `0` (Claude's 0 is a real zero, not grok's "unreported"). `--verbose` is always passed so a terminal result line is emitted. |
 | codex | JSONL events | `sessionId` from `thread.started.thread_id`; final text concatenated from `item.completed` events where `item.type == "agent_message"` (prefer the `-o` output file's content when present); `usage` from `turn.completed.usage`; a `turn.failed` event sets `ok: false` |
 | opencode | NDJSON events | Track `text` parts by `messageID`; final text is the parts belonging to the message whose `step_finish` event has `reason == "stop"` (fallback: last message with any text); `sessionID` from any event; an `error` event sets `ok: false` |
 
@@ -100,7 +103,7 @@ Classification only runs when the run looks failed: the process exited non-zero,
 Within a failed run, in order:
 
 1. `QUOTA_RE` (`\b429\b|rate limit|quota|out of credits`, case-insensitive) matched against stderr + parsed error message → `quota_exceeded`.
-2. `UNKNOWN_SESSION_RE` matched against stderr, or the parser's own `unknownSession` flag — **evaluated only when the run has failure evidence (`failedRun`)** → `backend_failed` with a hint to omit `--session` (this also drives the session-retry rule above). Gating this check on `failedRun` mirrors how the `QUOTA_RE`/`AUTH_RE` checks are already gated above: a successful, exit-0 run is never reclassified as a failure — and never triggers the session-drop retry — purely because stderr contains matching wording. The regex is `unknown session|invalid session|session not found|no rollout found|session get failed|no session id or title matched`, case-insensitive, shared by all three backends — kept deliberately narrow (no bare "session" or "not found") to avoid false-positiving on unrelated stderr noise. Two earlier alternatives are deliberately excluded: `failed to restore session` matched benign recovery warnings such as `Warning: failed to restore session cache; recovered` and turned successful runs into failures, and `couldn't start session` matched grok's real auth failure `Couldn't start session: unauthorized (401)`, which must classify as `auth_required`, not an unknown-session retry. Grok's real missing-session failure (verified against the live CLI) is covered by `session get failed` and `no session id or title matched "<id>" for this directory`, both of which remain matched.
+2. `UNKNOWN_SESSION_RE` matched against stderr, or the parser's own `unknownSession` flag — **evaluated only when the run has failure evidence (`failedRun`)** → `backend_failed` with a hint to omit `--session` (this also drives the session-retry rule above). Gating this check on `failedRun` mirrors how the `QUOTA_RE`/`AUTH_RE` checks are already gated above: a successful, exit-0 run is never reclassified as a failure — and never triggers the session-drop retry — purely because stderr contains matching wording. The regex is `unknown session|invalid session|session not found|no rollout found|session get failed|no session id or title matched`, case-insensitive, shared by all four backends — kept deliberately narrow (no bare "session" or "not found") to avoid false-positiving on unrelated stderr noise. Two earlier alternatives are deliberately excluded: `failed to restore session` matched benign recovery warnings such as `Warning: failed to restore session cache; recovered` and turned successful runs into failures, and `couldn't start session` matched grok's real auth failure `Couldn't start session: unauthorized (401)`, which must classify as `auth_required`, not an unknown-session retry. Grok's real missing-session failure (verified against the live CLI) is covered by `session get failed` and `no session id or title matched "<id>" for this directory`, both of which remain matched.
 3. Output that failed to parse at all: `AUTH_RE` (`unauthorized|\b401\b|not authenticated|api key|\blogin\b`) matched → `auth_required`; otherwise `parse_error`.
 4. Output that parsed: `AUTH_RE` matched → `auth_required`; otherwise a generic `backend_failed` with the parsed error message or `backend exited <code>`.
 
@@ -136,7 +139,7 @@ Known limitation: if the wrapper process itself receives `SIGKILL` (which cannot
 |---|---|
 | `plugins/delegate-model/scripts/delegate.js` | The wrapper itself |
 | `plugins/delegate-model/tests/run.sh` | Test harness (bash 3.2 compatible) |
-| `plugins/delegate-model/tests/mocks/{grok,codex,opencode}` | Fake CLI binaries used by tests |
+| `plugins/delegate-model/tests/mocks/{grok,codex,opencode,claude}` | Fake CLI binaries used by tests |
 | `plugins/delegate-model/tests/fixtures/*` | Recorded/synthesized backend outputs used to validate parsing |
 
 ### Run directory contents
@@ -154,7 +157,7 @@ Each non-dry-run invocation writes these files under its run directory (`--run-d
 
 ## Integration points
 
-Called exclusively via `node "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.js" ...` from the four skills in `plugins/delegate-model/skills/`. Not invoked by any hook, MCP server, or other automated trigger in v1.
+Called exclusively via `node "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.js" ...` from the five skills in `plugins/delegate-model/skills/`. Not invoked by any hook, MCP server, or other automated trigger in v1.
 
 ## Envelope schema
 
@@ -197,7 +200,8 @@ Called exclusively via `node "${CLAUDE_PLUGIN_ROOT}/scripts/delegate.js" ...` fr
 | `empty_final_message` | Final text empty/whitespace after retry rules were applied |
 | `parse_error` | Backend output could not be parsed into the expected shape |
 | `backend_failed` | Backend exited non-zero, or emitted an explicit failure event, for another reason |
-| `usage` | Bad wrapper invocation: missing required flag, relative `--cwd`, unknown backend, missing `--model` for opencode, `--worktree` on a non-git `--cwd` |
+| `recursion_guard` | `DELEGATE_DEPTH` is already ≥ `DELEGATE_MAX_DEPTH` (default 1); the wrapper refused to spawn anything. Exit code 2. |
+| `usage` | Bad wrapper invocation: missing required flag, relative `--cwd`, unknown backend, missing `--model` for opencode or claude, `--worktree` on a non-git `--cwd` |
 
 ## Exit codes
 
@@ -215,7 +219,7 @@ None.
 
 Run with `bash plugins/delegate-model/tests/run.sh` from the repo root. Bash 3.2 compatible; puts `tests/mocks` first on `PATH` so no real backend CLI or network access is required. Prints one `PASS:`/`FAIL:` line per case plus a final `<n> passed, <n> failed` summary, and exits non-zero if anything failed.
 
-23 cases, in run order:
+55 cases as of 2026-09-13, in run order. Additions beyond the original 23 include grok streaming-parse regressions (F1–F5), `--brief-file` conflict, the claude backend, `DELEGATE_NO_EXTRA_BIN_DIRS`, and `recursion_guard`.
 
 | # | Test name |
 |---|---|
@@ -223,10 +227,13 @@ Run with `bash plugins/delegate-model/tests/run.sh` from the repo root. Bash 3.2
 | 2 | usage: relative cwd exits 2 |
 | 3 | usage: unknown backend exits 2 |
 | 4 | usage: opencode without --model exits 2 |
-| 5 | not_installed: empty PATH exits 2 |
+| 4b | usage: claude without --model exits 2 |
+| 5 | not_installed: empty PATH exits 2 (`DELEGATE_NO_EXTRA_BIN_DIRS=1`) |
+| 5b | not_installed: claude empty PATH+no extra dirs exits 2 with hint |
 | 6 | parse: grok fixture text=OK sessionId |
 | 7 | parse: codex fixture text=OK sessionId |
 | 8 | parse: opencode fixture text=OK sessionId (step_finish stop) |
+| 8b | parse: claude fixture text=OK sessionId costUsd |
 | 9 | empty retry: read mode retries then OK |
 | 10 | empty retry: emptyRetried true when retry also empty |
 | 11 | write+dirty: no retry, empty_final_message, gitStatus set |
@@ -238,7 +245,11 @@ Run with `bash plugins/delegate-model/tests/run.sh` from the repo root. Bash 3.2
 | 17 | dry-run: no env or PATH keys |
 | 18 | dry-run: grok read has --no-subagents and --deny mcp__*, no --disable-web-search |
 | 19 | dry-run: codex --session exec options before resume |
+| 19b | dry-run: claude read has --safe-mode --tools, no --cwd/--bare/--max-turns |
+| 19c | dry-run: claude write is bypassPermissions + --max-budget-usd 5, no acceptEdits/--cwd |
 | 20 | quota: codex out-of-credits → quota_exceeded |
 | 21 | quota: answer text mentioning quota/rate limit/login is ok |
 | 22 | invariant: ok true iff exit 0 |
 | 23 | invariant: ok false iff non-zero exit |
+| — | recursion_guard: DELEGATE_DEPTH=1 exits 2 without spawning |
+| — | recursion_guard: DELEGATE_MAX_DEPTH=2 allows depth 1 |

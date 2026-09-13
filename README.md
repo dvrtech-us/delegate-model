@@ -1,6 +1,6 @@
 # delegate-model
 
-A Claude Code marketplace repo containing one plugin, `delegate-model`, which lets Claude delegate scoped tasks to local peer agents — Grok, Codex, and opencode — through one tested wrapper instead of re-deriving CLI flags and parsing per call.
+A Claude Code marketplace repo containing one plugin, `delegate-model`, which lets a host agent (Claude Code, Grok TUI, and anything else that loads these skills) delegate scoped tasks to local peer agents — Grok, Codex, opencode, and Claude Code — through one tested wrapper instead of re-deriving CLI flags and parsing per call.
 
 ## Install
 

@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * Delegate Model wrapper — one-shot spawn of grok / codex / opencode.
+ * Delegate Model wrapper — one-shot spawn of grok / codex / opencode / claude.
  * Node >= 18, zero dependencies. Always prints one JSON envelope on stdout.
  */
 
@@ -14,10 +14,12 @@ const https = require('https');
 const os = require('os');
 const path = require('path');
 
-const BACKENDS = new Set(['grok', 'codex', 'opencode']);
+const BACKENDS = new Set(['grok', 'codex', 'opencode', 'claude']);
 const TEXT_LIMIT = 20000;
 const KILL_GRACE_MS = 5000;
 const DEFAULT_TIMEOUT_SECS = 1800;
+const DEFAULT_MAX_DEPTH = 1;
+const CLAUDE_WRITE_BUDGET_USD = '5';
 const EXTRA_BIN_DIRS = [
   path.join(os.homedir(), '.grok', 'bin'),
   path.join(os.homedir(), '.local', 'bin'),
@@ -29,11 +31,13 @@ const INSTALL_HINT = {
   grok: 'Install the grok CLI and ensure it is on PATH (https://x.ai).',
   codex: 'Install the Codex CLI: https://github.com/openai/codex',
   opencode: 'Install OpenCode: https://opencode.ai',
+  claude: 'Install the Claude Code CLI: https://code.claude.com/docs/en/quickstart',
 };
 const AUTH_HINT = {
   grok: 'run `! grok login`',
   codex: 'run `! codex login`',
   opencode: 'run `! opencode providers login`',
+  claude: 'run `! claude auth`',
 };
 const GROK_DEFAULT_MODEL = 'grok-composer-2.5-fast';
 const OPENCODE_READ_PREFIX =
@@ -48,10 +52,35 @@ let activeChild = null;
 
 function usageText() {
   return [
-    'Usage: delegate.js <grok|codex|opencode> --mode read|write --cwd /abs [options] [-- brief]',
+    'Usage: delegate.js <grok|codex|opencode|claude> --mode read|write --cwd /abs [options] [-- brief]',
     'Options: --model ID --session ID --worktree [NAME] --timeout SECS --brief-file PATH',
     '         --extra-args "…" --dry-run --run-dir PATH',
   ].join('\n');
+}
+
+function recursionDepth() {
+  const n = Number(process.env.DELEGATE_DEPTH);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function maxRecursionDepth() {
+  const n = Number(process.env.DELEGATE_MAX_DEPTH);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_DEPTH;
+}
+
+function childEnv() {
+  const env = Object.assign({}, process.env);
+  env.DELEGATE_DEPTH = String(recursionDepth() + 1);
+  return env;
+}
+
+function extraBinDirs() {
+  if (process.env.DELEGATE_NO_EXTRA_BIN_DIRS === '1') return [];
+  return EXTRA_BIN_DIRS;
+}
+
+function usesStdinBrief(backend) {
+  return backend === 'codex';
 }
 
 function nowStamp() {
@@ -80,7 +109,7 @@ function isExecutableFile(file) {
 
 function findBinary(name) {
   const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  const dirs = pathDirs.concat(EXTRA_BIN_DIRS);
+  const dirs = pathDirs.concat(extraBinDirs());
   const seen = new Set();
   for (const dir of dirs) {
     if (seen.has(dir)) continue;
@@ -382,6 +411,9 @@ function parseCli(argv) {
   if (opts.backend === 'opencode' && !opts.model) {
     failUsage('opencode requires --model provider/model', { backend: opts.backend, mode: opts.mode, cwd: opts.cwd });
   }
+  if (opts.backend === 'claude' && !opts.model) {
+    failUsage('claude requires --model (e.g. sonnet, opus, haiku)', { backend: opts.backend, mode: opts.mode, cwd: opts.cwd });
+  }
   if (opts.worktreeRequested) {
     if (!opts.worktreeName || /[\\/]/.test(opts.worktreeName) || opts.worktreeName === '..') {
       failUsage('--worktree name must be a single path segment', { backend: opts.backend, mode: opts.mode, cwd: opts.cwd });
@@ -531,7 +563,7 @@ function runCommand({ bin, args, cwd, stdinData, timeoutMs, rawLogPath }) {
       // SIGTERM/SIGINT handlers never run and the detached child keeps running.
       child = spawn(bin, args, {
         cwd: cwd || undefined,
-        env: process.env,
+        env: childEnv(),
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
@@ -640,7 +672,7 @@ async function preflightOpencode({ bin, cwd, mode, model, timeoutMs }) {
     const listed = spawnSync(bin, ['agent', 'list'], {
       encoding: 'utf8',
       timeout: 5000,
-      env: process.env,
+      env: childEnv(),
       cwd: cwd || undefined,
     });
     if (agent && listed.status === 0) {
@@ -754,7 +786,8 @@ function grokParseFallbackFlatJson(trimmed) {
   };
 }
 
-function grokParse(stdout) {
+function grokParse(stdout, opts) {
+  const zeroCostMeansNull = !opts || opts.zeroCostMeansNull !== false;
   const trimmed = String(stdout || '').trim();
   if (!trimmed) {
     return { parsed: false, text: '', sessionId: null, usage: null, costUsd: null, failed: false, errorMessage: 'empty stdout' };
@@ -780,10 +813,9 @@ function grokParse(stdout) {
     const text = resultLine.result == null ? '' : String(resultLine.result);
     const sessionId = resultLine.session_id || systemSessionId || null;
     const usage = resultLine.usage || null;
+    const rawCost = resultLine.total_cost_usd;
     const costUsd =
-      typeof resultLine.total_cost_usd === 'number' && resultLine.total_cost_usd !== 0
-        ? resultLine.total_cost_usd
-        : null;
+      typeof rawCost !== 'number' ? null : zeroCostMeansNull && rawCost === 0 ? null : rawCost;
     const failed = resultLine.is_error === true || String(resultLine.subtype || '').startsWith('error_');
     const errorMessage = Array.isArray(resultLine.errors)
       ? resultLine.errors
@@ -852,6 +884,32 @@ function grokParse(stdout) {
 
 function grokResolvedModel(model) {
   return model || GROK_DEFAULT_MODEL;
+}
+
+// ---------------------------------------------------------------------------
+// claude adapter
+// ---------------------------------------------------------------------------
+
+function claudeBuildArgs({ brief, mode, model, session, extraArgs }) {
+  const args = ['-p', brief];
+  args.push('--model', model);
+  args.push('--output-format', 'stream-json', '--verbose');
+  args.push('--permission-prompts', 'none');
+  args.push('--safe-mode', '--disable-slash-commands');
+  if (mode === 'read') {
+    args.push('--permission-mode', 'dontAsk', '--tools', 'Read,Grep,Glob');
+  } else {
+    args.push('--permission-mode', 'bypassPermissions', '--max-budget-usd', CLAUDE_WRITE_BUDGET_USD);
+  }
+  if (session) args.push('--resume', session);
+  return args.concat(extraArgs);
+}
+
+function claudeParse(stdout) {
+  // Claude's stream-json (and buffered json) terminal line is the same
+  // type:result / type:error shape grok cloned. Do not inherit grok's
+  // costUsd 0→null rule: Claude reports a real 0 when it means 0.
+  return grokParse(stdout, { zeroCostMeansNull: false });
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,12 +1114,14 @@ function classify({ timedOut, exitCode, stderr, parsed, backend }) {
 function buildFor(backend, ctx) {
   if (backend === 'grok') return grokBuildArgs(ctx);
   if (backend === 'codex') return codexBuildArgs(ctx);
+  if (backend === 'claude') return claudeBuildArgs(ctx);
   return opencodeBuildArgs(ctx);
 }
 
 function parseFor(backend, stdout, lastTxtPath) {
   if (backend === 'grok') return grokParse(stdout);
   if (backend === 'codex') return codexParse(stdout, lastTxtPath);
+  if (backend === 'claude') return claudeParse(stdout);
   return opencodeParse(stdout);
 }
 
@@ -1081,6 +1141,25 @@ function writeRunFiles(runDir, { argv, brief, envelope, text }) {
 
 async function main() {
   const opts = parseCli(process.argv.slice(2));
+  const depth = recursionDepth();
+  const maxDepth = maxRecursionDepth();
+  if (depth >= maxDepth) {
+    emit(
+      baseEnvelope({
+        backend: opts.backend,
+        mode: opts.mode,
+        model: resolvedModel(opts.backend, opts.model),
+        cwd: opts.cwd,
+        error: {
+          class: 'recursion_guard',
+          message: `DELEGATE_DEPTH=${depth} >= DELEGATE_MAX_DEPTH=${maxDepth}; refusing nested delegation`,
+          hint: 'unset DELEGATE_DEPTH if you exported it in your shell; raise DELEGATE_MAX_DEPTH to allow one more nested level',
+        },
+        exitCode: 2,
+      }),
+      2
+    );
+  }
   const timeoutSecs =
     opts.timeout != null
       ? opts.timeout
@@ -1219,7 +1298,7 @@ async function main() {
       bin,
       args,
       cwd: effectiveCwd,
-      stdinData: opts.backend === 'codex' ? ctx.brief : '',
+      stdinData: usesStdinBrief(opts.backend) ? ctx.brief : '',
       timeoutMs,
       rawLogPath: rawLog,
     });

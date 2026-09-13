@@ -15,7 +15,7 @@ if [ -z "$NODE" ]; then
   exit 1
 fi
 
-chmod +x "$DELEGATE" "$MOCKS/grok" "$MOCKS/codex" "$MOCKS/opencode" 2>/dev/null || true
+chmod +x "$DELEGATE" "$MOCKS/grok" "$MOCKS/codex" "$MOCKS/opencode" "$MOCKS/claude" 2>/dev/null || true
 
 PASS=0
 FAIL=0
@@ -104,7 +104,8 @@ run_wrap() {
 
 with_mocks() {
   PATH="$MOCKS:$ORIG_PATH"
-  export PATH
+  DELEGATE_NO_EXTRA_BIN_DIRS=1
+  export PATH DELEGATE_NO_EXTRA_BIN_DIRS
 }
 
 # ---------------------------------------------------------------------------
@@ -144,17 +145,37 @@ else
   fail "usage: opencode without --model exits 2" "exit=$EC out=$OUT"
 fi
 
+run_wrap claude --mode read --cwd "$TMPROOT" -- "hi"
+if [ "$EC" -eq 2 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "usage" ]; then pass "usage: claude without --model exits 2"; else fail "usage: claude without --model exits 2" "error.class=$cls out=$OUT"; fi
+else
+  fail "usage: claude without --model exits 2" "exit=$EC out=$OUT"
+fi
+
 # ---------------------------------------------------------------------------
 # not_installed
 # ---------------------------------------------------------------------------
 EMPTY_HOME="$TMPROOT/empty-home"
 mkdir -p "$EMPTY_HOME"
-HOME="$EMPTY_HOME" PATH= run_wrap grok --mode read --cwd "$TMPROOT" -- "hi"
+HOME="$EMPTY_HOME" PATH= DELEGATE_NO_EXTRA_BIN_DIRS=1 run_wrap grok --mode read --cwd "$TMPROOT" -- "hi"
 if [ "$EC" -eq 2 ]; then
   cls=$(json_field "$OUT" "error.class")
   if [ "$cls" = "not_installed" ]; then pass "not_installed: empty PATH exits 2"; else fail "not_installed: empty PATH exits 2" "error.class=$cls out=$OUT"; fi
 else
   fail "not_installed: empty PATH exits 2" "exit=$EC out=$OUT err=$ERR"
+fi
+HOME="$EMPTY_HOME" PATH= DELEGATE_NO_EXTRA_BIN_DIRS=1 run_wrap claude --mode read --cwd "$TMPROOT" --model sonnet -- "hi"
+if [ "$EC" -eq 2 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  hint=$(json_field "$OUT" "error.hint")
+  if [ "$cls" = "not_installed" ] && [ -n "$hint" ]; then
+    pass "not_installed: claude empty PATH+no extra dirs exits 2 with hint"
+  else
+    fail "not_installed: claude empty PATH+no extra dirs exits 2 with hint" "error.class=$cls hint=$hint out=$OUT"
+  fi
+else
+  fail "not_installed: claude empty PATH+no extra dirs exits 2 with hint" "exit=$EC out=$OUT err=$ERR"
 fi
 with_mocks
 HOME="$REAL_HOME"
@@ -212,6 +233,37 @@ if [ "$EC" -eq 0 ]; then
 else
   fail "parse: opencode fixture text=OK sessionId (step_finish stop)" "exit=$EC out=$OUT err=$ERR"
 fi
+
+run_wrap claude --mode read --cwd "$PARSE_CWD" --model haiku --run-dir "$PARSE_RUN/claude" -- "Reply with exactly the word OK"
+if [ "$EC" -eq 0 ]; then
+  text=$(json_field "$OUT" "text")
+  sid=$(json_field "$OUT" "sessionId")
+  ok=$(json_field "$OUT" "ok")
+  cost=$(json_field "$OUT" "costUsd")
+  if [ "$text" = "OK" ] && [ "$sid" = "8eac20a9-5166-4f51-bcfc-b7b19f98f756" ] && [ "$ok" = "true" ] && [ "$cost" = "0.012379" ]; then
+    pass "parse: claude fixture text=OK sessionId costUsd"
+  else
+    fail "parse: claude fixture text=OK sessionId costUsd" "text=$text sid=$sid ok=$ok cost=$cost"
+  fi
+else
+  fail "parse: claude fixture text=OK sessionId costUsd" "exit=$EC out=$OUT err=$ERR"
+fi
+
+MOCK_BEHAVIOR=zero_cost
+export MOCK_BEHAVIOR
+run_wrap claude --mode read --cwd "$PARSE_CWD" --model haiku --run-dir "$PARSE_RUN/claude-zero-cost" -- "hi"
+if [ "$EC" -eq 0 ]; then
+  cost=$(json_field "$OUT" "costUsd")
+  if [ "$cost" = "0" ] && ! json_is_null_key "$OUT" "costUsd"; then
+    pass "claude: wire total_cost_usd 0 is preserved as costUsd 0 (not null)"
+  else
+    fail "claude: wire total_cost_usd 0 is preserved as costUsd 0 (not null)" "costUsd=$cost out=$OUT"
+  fi
+else
+  fail "claude: wire total_cost_usd 0 is preserved as costUsd 0 (not null)" "exit=$EC out=$OUT err=$ERR"
+fi
+MOCK_BEHAVIOR=ok
+export MOCK_BEHAVIOR
 
 # ---------------------------------------------------------------------------
 # empty retry (read)
@@ -438,6 +490,69 @@ if [ "$EC" -eq 0 ]; then
 else
   fail "dry-run: codex --session exec options before resume" "exit=$EC out=$OUT"
 fi
+
+MARKER="$TMPROOT/spawned-claude"
+rm -f "$MARKER"
+MOCK_SPAWN_MARKER="$MARKER"
+export MOCK_SPAWN_MARKER
+run_wrap claude --mode read --cwd "$PARSE_CWD" --model sonnet --dry-run -- "hi"
+if [ "$EC" -eq 0 ]; then
+  if [ -f "$MARKER" ]; then
+    fail "dry-run: claude read argv" "mock was spawned"
+  else
+    printf '%s' "$OUT" | "$NODE" -e '
+      const fs = require("fs");
+      const raw = fs.readFileSync(0, "utf8");
+      const j = JSON.parse(raw.slice(raw.indexOf("{")));
+      const cmd = j.command || [];
+      const has = (f) => cmd.indexOf(f) >= 0;
+      const after = (f) => { const i = cmd.indexOf(f); return i < 0 ? null : cmd[i + 1]; };
+      if (cmd[1] !== "-p") process.exit(10);
+      if (!has("--safe-mode") || !has("--disable-slash-commands")) process.exit(11);
+      if (!has("--verbose") || after("--output-format") !== "stream-json") process.exit(12);
+      if (after("--permission-mode") !== "dontAsk") process.exit(13);
+      if (after("--permission-prompts") !== "none") process.exit(14);
+      if (after("--tools") !== "Read,Grep,Glob") process.exit(15);
+      if (after("--model") !== "sonnet") process.exit(16);
+      if (has("--cwd") || has("--bare") || has("--max-turns") || has("acceptEdits")) process.exit(17);
+      if (has("--dangerously-skip-permissions")) process.exit(18);
+    '
+    if [ $? -eq 0 ]; then
+      pass "dry-run: claude read has --safe-mode --tools, no --cwd/--bare/--max-turns"
+    else
+      fail "dry-run: claude read has --safe-mode --tools, no --cwd/--bare/--max-turns" "out=$OUT"
+    fi
+  fi
+else
+  fail "dry-run: claude read argv" "exit=$EC out=$OUT"
+fi
+
+run_wrap claude --mode write --cwd "$PARSE_CWD" --model sonnet --dry-run -- "hi"
+if [ "$EC" -eq 0 ]; then
+  printf '%s' "$OUT" | "$NODE" -e '
+    const fs = require("fs");
+    const raw = fs.readFileSync(0, "utf8");
+    const j = JSON.parse(raw.slice(raw.indexOf("{")));
+    const cmd = j.command || [];
+    const has = (f) => cmd.indexOf(f) >= 0;
+    const after = (f) => { const i = cmd.indexOf(f); return i < 0 ? null : cmd[i + 1]; };
+    if (after("--permission-mode") !== "bypassPermissions") process.exit(10);
+    if (after("--max-budget-usd") !== "5") process.exit(11);
+    if (has("acceptEdits") || has("--cwd")) process.exit(12);
+    if (!has("--safe-mode") || after("--permission-prompts") !== "none") process.exit(14);
+    if (after("--output-format") !== "stream-json" || !has("--verbose")) process.exit(15);
+    if (cmd[1] !== "-p") process.exit(16);
+    if (has("--tools") || has("--bare") || has("--max-turns") || has("--dangerously-skip-permissions")) process.exit(17);
+  '
+  if [ $? -eq 0 ]; then
+    pass "dry-run: claude write is bypassPermissions + --max-budget-usd 5, no acceptEdits/--cwd"
+  else
+    fail "dry-run: claude write is bypassPermissions + --max-budget-usd 5, no acceptEdits/--cwd" "out=$OUT"
+  fi
+else
+  fail "dry-run: claude write argv" "exit=$EC out=$OUT"
+fi
+unset MOCK_SPAWN_MARKER
 
 # ---------------------------------------------------------------------------
 # quota (codex fixture) + answer-text must not classify as quota
@@ -788,6 +903,47 @@ if [ "$EC" -eq 0 ]; then
 else
   fail "brief-file: used alone still reads the file" "exit=$EC out=$OUT err=$ERR"
 fi
+
+# ---------------------------------------------------------------------------
+# recursion_guard: DELEGATE_DEPTH refuses before spawn
+# ---------------------------------------------------------------------------
+MARKER="$TMPROOT/spawned-depth"
+rm -f "$MARKER"
+MOCK_SPAWN_MARKER="$MARKER"
+export MOCK_SPAWN_MARKER
+MOCK_BEHAVIOR=ok
+export MOCK_BEHAVIOR
+DELEGATE_DEPTH=1 run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/depth" -- "hi"
+if [ "$EC" -eq 2 ]; then
+  cls=$(json_field "$OUT" "error.class")
+  if [ "$cls" = "recursion_guard" ] && [ ! -f "$MARKER" ]; then
+    pass "recursion_guard: DELEGATE_DEPTH=1 exits 2 without spawning"
+  else
+    fail "recursion_guard: DELEGATE_DEPTH=1 exits 2 without spawning" "class=$cls spawned=$( [ -f "$MARKER" ] && echo yes || echo no ) out=$OUT"
+  fi
+else
+  fail "recursion_guard: DELEGATE_DEPTH=1 exits 2 without spawning" "exit=$EC out=$OUT"
+fi
+
+rm -f "$MARKER"
+DEPTH_FILE="$TMPROOT/child-depth"
+rm -f "$DEPTH_FILE"
+MOCK_DEPTH_FILE="$DEPTH_FILE"
+export MOCK_DEPTH_FILE
+DELEGATE_DEPTH=1 DELEGATE_MAX_DEPTH=2 run_wrap grok --mode read --cwd "$PARSE_CWD" --run-dir "$PARSE_RUN/depth-ok" -- "hi"
+if [ "$EC" -eq 0 ]; then
+  ok=$(json_field "$OUT" "ok")
+  child_depth=$(cat "$DEPTH_FILE" 2>/dev/null)
+  if [ "$ok" = "true" ] && [ -f "$MARKER" ] && [ "$child_depth" = "2" ]; then
+    pass "recursion_guard: DELEGATE_MAX_DEPTH=2 allows depth 1"
+    pass "recursion_guard: child env DELEGATE_DEPTH is current+1"
+  else
+    fail "recursion_guard: DELEGATE_MAX_DEPTH=2 allows depth 1 / child depth+1" "ok=$ok spawned=$( [ -f "$MARKER" ] && echo yes || echo no ) child_depth=$child_depth out=$OUT"
+  fi
+else
+  fail "recursion_guard: DELEGATE_MAX_DEPTH=2 allows depth 1 / child depth+1" "exit=$EC out=$OUT"
+fi
+unset MOCK_SPAWN_MARKER MOCK_DEPTH_FILE
 
 # ---------------------------------------------------------------------------
 # ok / exit-code invariant

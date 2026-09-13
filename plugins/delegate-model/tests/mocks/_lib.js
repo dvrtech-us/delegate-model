@@ -9,6 +9,8 @@ const FIXTURES = path.join(__dirname, '..', 'fixtures');
 function markSpawned() {
   const p = process.env.MOCK_SPAWN_MARKER;
   if (p) fs.writeFileSync(p, String(process.pid));
+  const depthFile = process.env.MOCK_DEPTH_FILE;
+  if (depthFile) fs.writeFileSync(depthFile, process.env.DELEGATE_DEPTH == null ? '' : String(process.env.DELEGATE_DEPTH));
 }
 
 function writePid() {

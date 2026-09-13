@@ -1,12 +1,12 @@
 {
   "name": "delegate-model",
   "owner": { "name": "DVRTech", "url": "https://github.com/dvrtech-us" },
-  "description": "Delegate scoped Claude Code tasks to local Grok, Codex, and OpenCode agents.",
+  "description": "Delegate scoped tasks to local Grok, Codex, OpenCode, and Claude Code agents.",
   "plugins": [
     {
       "name": "delegate-model",
       "source": "./plugins/delegate-model",
-      "description": "Delegate scoped tasks to local Grok, Codex, or OpenCode CLIs.",
+      "description": "Delegate scoped tasks to local Grok, Codex, OpenCode, or Claude Code CLIs.",
       "category": "development"
     }
   ]

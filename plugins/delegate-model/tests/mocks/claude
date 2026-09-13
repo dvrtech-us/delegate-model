@@ -1,0 +1,62 @@
+#!/usr/bin/env node
+'use strict';
+
+const lib = require('./_lib');
+
+lib.markSpawned();
+const args = process.argv.slice(2);
+const b = lib.resolveBehavior();
+
+if (b === 'hang') {
+  lib.hang();
+  return;
+}
+
+if (b === 'touch_file') {
+  lib.touchInCwd(args);
+}
+
+function emitFixture(name, code) {
+  const body = lib.readFixture(name);
+  process.stdout.write(body);
+  if (!body.endsWith('\n')) process.stdout.write('\n');
+  process.exit(code);
+}
+
+if (b === 'zero_cost') {
+  process.stdout.write(
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-zero-cost' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'OK',
+        session_id: 'mock-zero-cost',
+        usage: { input_tokens: 1, output_tokens: 1 },
+        total_cost_usd: 0,
+      }),
+    ].join('\n') + '\n'
+  );
+  process.exit(0);
+}
+
+if (b === 'empty' || b === 'touch_file') {
+  process.stdout.write(
+    [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: 'mock-empty-session' }),
+      JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: '',
+        session_id: 'mock-empty-session',
+        usage: { input_tokens: 1, output_tokens: 0 },
+        total_cost_usd: 0,
+      }),
+    ].join('\n') + '\n'
+  );
+  process.exit(0);
+}
+
+emitFixture('claude-ok.ndjson', 0);
