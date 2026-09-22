@@ -23,6 +23,8 @@ const EXTRA_BIN_DIRS = [
   '/usr/local/bin',
   '/opt/homebrew/bin',
 ];
+const DEFAULT_PATHEXT = ['.COM', '.EXE', '.BAT', '.CMD'];
+const ALLOWED_PATHEXT = new Set(DEFAULT_PATHEXT);
 const AUTH_RE = /unauthorized|\b401\b|not authenticated|api key|\blogin\b/i;
 const QUOTA_RE = /\b429\b|rate limit|quota|out of credits/i;
 const UNKNOWN_SESSION_RE = /unknown session|invalid session|session not found|no rollout found|session get failed|no session id or title matched/i;
@@ -79,33 +81,98 @@ function randHex(n) {
   return crypto.randomBytes(n).toString('hex');
 }
 
-function isExecutableFile(file) {
+function isExecutableFile(file, platform) {
   try {
     const st = fs.statSync(file);
     if (!st.isFile()) return false;
-    if (process.platform === 'win32') return true;
+    if ((platform || process.platform) === 'win32') return true;
     return (st.mode & 0o111) !== 0;
   } catch {
     return false;
   }
 }
 
-function findBinary(name) {
-  if (!name) return null;
-  if (name.includes(path.sep) || name.startsWith('.') || path.isAbsolute(name)) {
-    const abs = path.isAbsolute(name) ? name : path.resolve(name);
-    return isExecutableFile(abs) ? abs : null;
+function parsePathext(raw) {
+  const src = raw == null || String(raw).trim() === '' ? DEFAULT_PATHEXT.join(';') : String(raw);
+  const out = [];
+  const seen = new Set();
+  for (const part of src.split(';')) {
+    let ext = part.trim();
+    if (!ext) continue;
+    if (ext[0] !== '.') ext = `.${ext}`;
+    const key = ext.toUpperCase();
+    if (!ALLOWED_PATHEXT.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(ext);
   }
-  const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  const dirs = pathDirs.concat(extraBinDirs());
+  return out.length ? out : DEFAULT_PATHEXT.slice();
+}
+
+function namesToTry(name, platform, pathextRaw) {
+  if (!name) return [];
+  if ((platform || process.platform) !== 'win32') return [name];
+  // path.win32.extname('.codex') === '' — a leading-dot name is not an extension.
+  if (path.win32.extname(name)) return [name];
+  return parsePathext(pathextRaw).map((ext) => name + ext);
+}
+
+function looksLikePath(name) {
+  if (!name) return false;
+  // Separators / absolute only. A leading-dot token (".codex") is a PATH name,
+  // not a relative path; "./codex" and ".\\codex" already contain a separator.
+  if (path.isAbsolute(name)) return true;
+  return name.includes('/') || name.includes('\\');
+}
+
+function findBinary(name, opts) {
+  if (!name) return null;
+  const platform = (opts && opts.platform) || process.platform;
+  const env = (opts && opts.env) || process.env;
+  const extra = opts && Array.isArray(opts.extraDirs) ? opts.extraDirs : extraBinDirs();
+  const variants = namesToTry(name, platform, env.PATHEXT);
+
+  if (looksLikePath(name)) {
+    for (const v of variants) {
+      const abs = path.isAbsolute(v) ? v : path.resolve(v);
+      if (isExecutableFile(abs, platform)) return abs;
+    }
+    return null;
+  }
+
+  const pathDirs = (env.PATH || '').split(path.delimiter).filter(Boolean);
+  const dirs = pathDirs.concat(extra);
   const seen = new Set();
   for (const dir of dirs) {
     if (seen.has(dir)) continue;
     seen.add(dir);
-    const candidate = path.join(dir, name);
-    if (isExecutableFile(candidate)) return candidate;
+    for (const v of variants) {
+      const candidate = path.join(dir, v);
+      if (isExecutableFile(candidate, platform)) return candidate;
+    }
   }
   return null;
+}
+
+function quoteCmdArg(s) {
+  // Always quote. cmd /s /c "..." strips the first and last quote; mixed
+  // quoted/unquoted tokens then leave a dangling quote on args with spaces.
+  return `"${String(s).replace(/%/g, '%%').replace(/"/g, '""')}"`;
+}
+
+function spawnFileArgs(bin, args, opts) {
+  const argv = args || [];
+  const platform = (opts && opts.platform) || process.platform;
+  if (platform !== 'win32') return { file: bin, argv, spawnOpts: {} };
+  const ext = path.win32.extname(bin).toLowerCase();
+  if (ext !== '.cmd' && ext !== '.bat') return { file: bin, argv, spawnOpts: {} };
+  const env = (opts && opts.env) || process.env;
+  const comspec = env.ComSpec || env.COMSPEC || 'cmd.exe';
+  const inner = [quoteCmdArg(bin)].concat(argv.map(quoteCmdArg)).join(' ');
+  return {
+    file: comspec,
+    argv: ['/d', '/s', '/c', `"${inner}"`],
+    spawnOpts: { windowsVerbatimArguments: true },
+  };
 }
 
 function splitShellWords(str) {
@@ -457,6 +524,7 @@ module.exports = {
   DEFAULT_MAX_DEPTH,
   HANDSHAKE_TIMEOUT_MS,
   EXTRA_BIN_DIRS,
+  DEFAULT_PATHEXT,
   AUTH_RE,
   QUOTA_RE,
   UNKNOWN_SESSION_RE,
@@ -470,7 +538,12 @@ module.exports = {
   nowStamp,
   randHex,
   isExecutableFile,
+  parsePathext,
+  namesToTry,
+  looksLikePath,
   findBinary,
+  quoteCmdArg,
+  spawnFileArgs,
   splitShellWords,
   clipText,
   tailLines,

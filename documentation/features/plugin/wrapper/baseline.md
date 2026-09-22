@@ -9,6 +9,9 @@
 - If `DELEGATE_DEPTH` is already ≥ `DELEGATE_MAX_DEPTH` (default 1), the wrapper always emits `error.class: "recursion_guard"` and exit 2 before worktree, spawn, or run-directory creation, including on `--dry-run`.
 - Every spawned child (and opencode's `agent list` preflight) receives a copy of `process.env` with `DELEGATE_DEPTH` set to the current depth plus one. The wrapper never passes `env: process.env` verbatim.
 - When `DELEGATE_NO_EXTRA_BIN_DIRS=1`, `findBinary` searches only `PATH` and never the hardcoded extra directories (`~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin`).
+- `findBinary` never searches the current working directory. A leading-dot token (`.codex`) is a PATH name, not a relative path; only absolute names or names containing `/` or `\` (including `./codex` and `.\codex`) take the explicit-path branch. On non-Windows it looks up the exact name and requires the Unix execute bit. On Windows a name with no extension is tried as `name` plus each filtered PATHEXT entry, never as a bare extensionless file; a name that already has an extension (`path.win32.extname`, so `.codex` is not an extension) is tried as-is.
+- Filtered PATHEXT is only `.COM`, `.EXE`, `.BAT`, `.CMD` (case-insensitive, leading-dot prepended if missing, order preserved, duplicates dropped). Unset, empty, or all-disallowed PATHEXT falls back to `.COM;.EXE;.BAT;.CMD`. `.JS`, `.VBS`, and other script extensions are never tried.
+- Spawn never uses `shell: true`. On Windows a resolved `.cmd` or `.bat` is launched as `ComSpec` (or `COMSPEC`, else `cmd.exe`) with `/d /s /c`, `windowsVerbatimArguments: true`, and every token quoted (`%` → `%%`, `"` → `""`). `.exe` and `.com` are spawned as the resolved file.
 - Claude's write posture never uses `--permission-mode acceptEdits`, `--bare`, `--max-turns`, or `--dangerously-skip-permissions`. Write is always `bypassPermissions` plus `--max-budget-usd 5`. Read is always `--tools Read,Grep,Glob` (one comma-joined token), `--permission-mode dontAsk`, `--permission-prompts none`, `--safe-mode`, `--disable-slash-commands`, `--output-format stream-json`, `--verbose`.
 - Claude argv never contains `--cwd`. Working directory is the spawn `cwd` only.
 - Claude's brief is always the positional immediately after `-p`, never stdin (`usesStdinBrief` is true only for codex).
@@ -69,7 +72,7 @@
 | Kill sequence | SIGTERM, wait 5s, SIGKILL | not configurable |
 | Run directory | `${CLAUDE_PLUGIN_DATA:-~/.claude/plugins/data/delegate-model}/runs/<timestamp>-<backend>-<rand>`, mode 0700 | `--run-dir PATH` |
 | Worktree path | `<cwd>-wt-<NAME>` on branch `delegate/<NAME>` | not configurable |
-| Binary search path | `PATH` + `~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin` | `DELEGATE_NO_EXTRA_BIN_DIRS=1` searches PATH only |
+| Binary search path | `PATH` + `~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin`. Windows: filtered PATHEXT (default `.COM;.EXE;.BAT;.CMD`) | `DELEGATE_NO_EXTRA_BIN_DIRS=1` searches PATH only; `PATHEXT` on Windows |
 | Recursion depth | `DELEGATE_DEPTH` (default 0) | set on children to current+1 |
 | Recursion cap | `DELEGATE_MAX_DEPTH` default 1 | `DELEGATE_MAX_DEPTH` env |
 | Claude write budget | `--max-budget-usd 5` | `--extra-args` |
@@ -85,8 +88,9 @@ Not applicable — this is a local single-user CLI wrapper, no auth boundary of 
 ## Known limitations
 
 - The wrapper installs `SIGTERM`/`SIGINT` handlers that kill the active child's process group before the wrapper itself exits. The child is spawned detached specifically so this works. If the wrapper process is sent `SIGKILL` (uncatchable), neither handler runs and the detached child may keep running after the wrapper is gone.
+- Windows residuals not addressed in the PATHEXT patch: `EXTRA_BIN_DIRS` is still Unix paths; `killProcessTree` on win32 is still `child.kill()` (not `taskkill /T`); `git()` still `spawnSync('git')` and relies on Node's own LookPath.
 - Grok's `raw.log` and in-memory stdout buffer are larger under `streaming-messages-json` than they were under the old buffered `json` format, because every streamed line (including full `tool_result` payloads) is captured, not just the final result. Accepted for now in exchange for observability: the old format emitted nothing until the process exited, so a long-running grok call was indistinguishable from a hang.
 
 ## Tests
 
-`bash plugins/delegate-model/tests/run.sh`, 66 cases as of 2026-09-13 (includes ACP client cases), bash 3.2 compatible, backend CLIs mocked via `tests/mocks` on `PATH` (no network or real backend needed). See the wrapper feature doc's Tests section for the full list of case names.
+`bash plugins/delegate-model/tests/run.sh`, 88 cases as of 2026-09-19 (includes ACP client cases and PATHEXT helpers simulated on darwin), bash 3.2 compatible, backend CLIs mocked via `tests/mocks` on `PATH` (no network or real backend needed). See the wrapper feature doc's Tests section for the full list of case names.

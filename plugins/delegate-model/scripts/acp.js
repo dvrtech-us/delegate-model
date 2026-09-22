@@ -21,6 +21,7 @@ const {
   PLUGIN_VERSION,
   childEnv,
   findBinary,
+  spawnFileArgs,
   splitShellWords,
   clipText,
   tailLines,
@@ -347,13 +348,14 @@ async function runAcpOnce({ bin, args, cwd, brief, mode, session, timeoutMs, raw
   let timedOut = false;
   let child;
   try {
-    child = spawn(bin, args, {
+    const launched = spawnFileArgs(bin, args);
+    child = spawn(launched.file, launched.argv, Object.assign({
       cwd: cwd || undefined,
       env: childEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
       windowsHide: true,
-    });
+    }, launched.spawnOpts));
   } catch (err) {
     return {
       okRpc: false,

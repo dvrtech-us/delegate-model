@@ -192,6 +192,225 @@ HOME="$REAL_HOME"
 export HOME
 
 # ---------------------------------------------------------------------------
+# findBinary PATHEXT (pure helpers; win32 simulated on darwin)
+# ---------------------------------------------------------------------------
+LIB="$PLUGIN_DIR/scripts/lib.js"
+
+node_lib() {
+  "$NODE" -e "$1" "$LIB" "$2" "$3" "$4"
+}
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).parsePathext(null)))')
+if [ "$got" = '[".COM",".EXE",".BAT",".CMD"]' ]; then
+  pass "parsePathext: unset uses default COM/EXE/BAT/CMD"
+else
+  fail "parsePathext: unset uses default COM/EXE/BAT/CMD" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).parsePathext("")))')
+if [ "$got" = '[".COM",".EXE",".BAT",".CMD"]' ]; then
+  pass "parsePathext: empty uses default"
+else
+  fail "parsePathext: empty uses default" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).parsePathext(".exe;.cmd")))')
+if [ "$got" = '[".exe",".cmd"]' ]; then
+  pass "parsePathext: .exe;.cmd keeps order and case"
+else
+  fail "parsePathext: .exe;.cmd keeps order and case" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).parsePathext(".EXE;.JS;.VBS;.CMD")))')
+if [ "$got" = '[".EXE",".CMD"]' ]; then
+  pass "parsePathext: drops .JS and .VBS"
+else
+  fail "parsePathext: drops .JS and .VBS" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).parsePathext("exe;cmd")))')
+if [ "$got" = '[".exe",".cmd"]' ]; then
+  pass "parsePathext: missing leading dot is prepended"
+else
+  fail "parsePathext: missing leading dot is prepended" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).parsePathext(".JS;.VBS")))')
+if [ "$got" = '[".COM",".EXE",".BAT",".CMD"]' ]; then
+  pass "parsePathext: only-script list falls back to default"
+else
+  fail "parsePathext: only-script list falls back to default" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).namesToTry("codex","darwin")))')
+if [ "$got" = '["codex"]' ]; then
+  pass "namesToTry: darwin is the bare name"
+else
+  fail "namesToTry: darwin is the bare name" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).namesToTry("codex","win32",".EXE;.CMD")))')
+if [ "$got" = '["codex.EXE","codex.CMD"]' ]; then
+  pass "namesToTry: win32 appends PATHEXT, never the bare name"
+else
+  fail "namesToTry: win32 appends PATHEXT, never the bare name" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).namesToTry("codex.exe","win32",".COM;.EXE;.CMD")))')
+if [ "$got" = '["codex.exe"]' ]; then
+  pass "namesToTry: existing extension is used as-is"
+else
+  fail "namesToTry: existing extension is used as-is" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(JSON.stringify(require(process.argv[1]).namesToTry(".codex","win32",".EXE")))')
+if [ "$got" = '[".codex.EXE"]' ]; then
+  pass "namesToTry: leading-dot name has no extension"
+else
+  fail "namesToTry: leading-dot name has no extension" "got=$got"
+fi
+
+got=$(node_lib 'const s=require(process.argv[1]).spawnFileArgs("codex",["-p"],{platform:"darwin"}); process.stdout.write(JSON.stringify({file:s.file,argv:s.argv,verbatim:!!s.spawnOpts.windowsVerbatimArguments}))')
+if [ "$got" = '{"file":"codex","argv":["-p"],"verbatim":false}' ]; then
+  pass "spawnFileArgs: darwin passes file and argv through"
+else
+  fail "spawnFileArgs: darwin passes file and argv through" "got=$got"
+fi
+
+got=$(node_lib 'const s=require(process.argv[1]).spawnFileArgs("C:\\npm\\codex.exe",["-p"],{platform:"win32"}); process.stdout.write(s.file==="C:\\npm\\codex.exe"&&s.argv.length===1&&s.argv[0]==="-p"?"ok":JSON.stringify(s))')
+if [ "$got" = "ok" ]; then
+  pass "spawnFileArgs: win32 .exe is spawned directly"
+else
+  fail "spawnFileArgs: win32 .exe is spawned directly" "got=$got"
+fi
+
+got=$(node_lib 'const s=require(process.argv[1]).spawnFileArgs("C:\\npm\\codex.cmd",["-p","hi there"],{platform:"win32",env:{ComSpec:"C:\\Windows\\system32\\cmd.exe"}}); const inner=s.argv[3]; const ok=s.file==="C:\\Windows\\system32\\cmd.exe"&&s.argv[0]==="/d"&&s.argv[1]==="/s"&&s.argv[2]==="/c"&&s.spawnOpts.windowsVerbatimArguments===true&&s.spawnOpts.shell!==true&&inner==="\"\"C:\\npm\\codex.cmd\" \"-p\" \"hi there\"\""; process.stdout.write(ok?"ok":JSON.stringify(s))')
+if [ "$got" = "ok" ]; then
+  pass "spawnFileArgs: win32 .cmd uses ComSpec /d /s /c, never shell:true"
+else
+  fail "spawnFileArgs: win32 .cmd uses ComSpec /d /s /c, never shell:true" "got=$got"
+fi
+
+got=$(node_lib 'process.stdout.write(require(process.argv[1]).quoteCmdArg("a%b\"c"))')
+if [ "$got" = '"a%%b""c"' ]; then
+  pass "quoteCmdArg: percents doubled, quotes doubled, always quoted"
+else
+  fail "quoteCmdArg: percents doubled, quotes doubled, always quoted" "got=$got"
+fi
+
+PDIR="$TMPROOT/pathext-bin"
+mkdir -p "$PDIR"
+printf 'x' > "$PDIR/codex"
+got=$(node_lib '
+  const lib = require(process.argv[1]);
+  const r = lib.findBinary("codex", {
+    platform: "win32",
+    env: { PATH: process.argv[2], PATHEXT: ".exe;.cmd" },
+    extraDirs: [],
+  });
+  process.stdout.write(r == null ? "null" : r);
+' "$PDIR")
+if [ "$got" = "null" ]; then
+  pass "findBinary: win32 does not match an extensionless file"
+else
+  fail "findBinary: win32 does not match an extensionless file" "got=$got"
+fi
+
+printf 'x' > "$PDIR/codex.exe"
+got=$(node_lib '
+  const lib = require(process.argv[1]);
+  process.stdout.write(lib.findBinary("codex", {
+    platform: "win32",
+    env: { PATH: process.argv[2], PATHEXT: ".exe;.cmd" },
+    extraDirs: [],
+  }) || "null");
+' "$PDIR")
+if [ "$got" = "$PDIR/codex.exe" ]; then
+  pass "findBinary: win32 resolves codex to codex.exe"
+else
+  fail "findBinary: win32 resolves codex to codex.exe" "got=$got"
+fi
+
+printf 'x' > "$PDIR/grok.cmd"
+got=$(node_lib '
+  const lib = require(process.argv[1]);
+  process.stdout.write(lib.findBinary("grok", {
+    platform: "win32",
+    env: { PATH: process.argv[2], PATHEXT: ".exe;.cmd" },
+    extraDirs: [],
+  }) || "null");
+' "$PDIR")
+if [ "$got" = "$PDIR/grok.cmd" ]; then
+  pass "findBinary: win32 falls through to .cmd when .exe is absent"
+else
+  fail "findBinary: win32 falls through to .cmd when .exe is absent" "got=$got"
+fi
+
+printf 'x' > "$PDIR/opencode.js"
+got=$(node_lib '
+  const lib = require(process.argv[1]);
+  process.stdout.write(lib.findBinary("opencode", {
+    platform: "win32",
+    env: { PATH: process.argv[2], PATHEXT: ".JS;.EXE" },
+    extraDirs: [],
+  }) || "null");
+' "$PDIR")
+if [ "$got" = "null" ]; then
+  pass "findBinary: win32 never resolves a .JS even when PATHEXT lists it"
+else
+  fail "findBinary: win32 never resolves a .JS even when PATHEXT lists it" "got=$got"
+fi
+
+got=$(node_lib '
+  const lib = require(process.argv[1]);
+  process.stdout.write(lib.findBinary("codex", {
+    env: { PATH: process.argv[2] },
+    extraDirs: [],
+  }) || "null");
+' "$PDIR")
+if [ "$got" = "null" ]; then
+  pass "findBinary: darwin still requires the execute bit"
+else
+  fail "findBinary: darwin still requires the execute bit" "got=$got"
+fi
+
+chmod +x "$PDIR/codex"
+got=$(node_lib '
+  const lib = require(process.argv[1]);
+  process.stdout.write(lib.findBinary("codex", {
+    env: { PATH: process.argv[2] },
+    extraDirs: [],
+  }) || "null");
+' "$PDIR")
+if [ "$got" = "$PDIR/codex" ]; then
+  pass "findBinary: darwin still finds an executable bare name"
+else
+  fail "findBinary: darwin still finds an executable bare name" "got=$got"
+fi
+
+got=$(node_lib 'const L=require(process.argv[1]); process.stdout.write([L.looksLikePath(".codex"),L.looksLikePath("./codex"),L.looksLikePath(".\\codex"),L.looksLikePath("codex")].join(","))')
+if [ "$got" = "false,true,true,false" ]; then
+  pass "looksLikePath: leading-dot token is not a path; ./ and .\\\\ are"
+else
+  fail "looksLikePath: leading-dot token is not a path; ./ and .\\\\ are" "got=$got"
+fi
+
+printf 'x' > "$PDIR/.codex.exe"
+got=$(node_lib '
+  const lib = require(process.argv[1]);
+  process.stdout.write(lib.findBinary(".codex", {
+    platform: "win32",
+    env: { PATH: process.argv[2], PATHEXT: ".exe;.cmd" },
+    extraDirs: [],
+  }) || "null");
+' "$PDIR")
+if [ "$got" = "$PDIR/.codex.exe" ]; then
+  pass "findBinary: win32 leading-dot name is looked up on PATH"
+else
+  fail "findBinary: win32 leading-dot name is looked up on PATH" "got=$got"
+fi
+
+# ---------------------------------------------------------------------------
 # parse fixtures
 # ---------------------------------------------------------------------------
 PARSE_CWD="$TMPROOT/parse-cwd"

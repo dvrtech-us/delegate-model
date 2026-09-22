@@ -17,7 +17,7 @@ Entry: `plugins/delegate-model/scripts/acp.js`. Shared helpers: `plugins/delegat
 1. Parse CLI. `--mode`, `--cwd` (absolute), `--agent` required. `--model` is a usage error.
 2. Recursion guard (`DELEGATE_DEPTH`).
 3. Worktree (same sibling layout as `delegate.js`).
-4. `splitShellWords(--agent)` + `--extra-args`; `findBinary` on first token (PATH, extra dirs, or an explicit path).
+4. `splitShellWords(--agent)` + `--extra-args`; `findBinary` on first token (PATH, extra dirs, or an explicit path; same Windows PATHEXT / no-cwd rules as the wrapper). `.cmd`/`.bat` agents use the shared ComSpec spawn path.
 5. Spawn with stdin kept open (unlike `runCommand`, which ends stdin).
 6. Duplex NDJSON JSON-RPC: outbound requests use a client id space; inbound messages with `method`+`id` are requests (`session/request_permission`); `method` without `id` are notifications (`session/update`).
 7. `initialize` with `clientCapabilities: {}` (no fs/terminal). `authMethods` on initialize is **not** treated as logged-out.

@@ -28,6 +28,7 @@ const {
   nowStamp,
   randHex,
   findBinary,
+  spawnFileArgs,
   splitShellWords,
   clipText,
   tailLines,
@@ -284,13 +285,16 @@ function runCommand({ bin, args, cwd, stdinData, timeoutMs, rawLogPath }) {
       // detached: child is its own process group so we can kill(-pid). If this
       // wrapper itself is killed (SIGKILL, e.g. the caller's timeout) the
       // SIGTERM/SIGINT handlers never run and the detached child keeps running.
-      child = spawn(bin, args, {
+      // On Windows, .cmd/.bat shims go through ComSpec (/d /s /c) rather than
+      // shell:true, which would re-parse --extra-args as cmd.exe.
+      const launched = spawnFileArgs(bin, args);
+      child = spawn(launched.file, launched.argv, Object.assign({
         cwd: cwd || undefined,
         env: childEnv(),
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: process.platform !== 'win32',
         windowsHide: true,
-      });
+      }, launched.spawnOpts));
     } catch (err) {
       stderr = String(err.message || err);
       finish(1, null);
@@ -392,12 +396,13 @@ function providerBaseUrl(cfg, providerId) {
 async function preflightOpencode({ bin, cwd, mode, model, timeoutMs }) {
   const agent = mode === 'read' ? 'plan' : null;
   try {
-    const listed = spawnSync(bin, ['agent', 'list'], {
+    const launched = spawnFileArgs(bin, ['agent', 'list']);
+    const listed = spawnSync(launched.file, launched.argv, Object.assign({
       encoding: 'utf8',
       timeout: 5000,
       env: childEnv(),
       cwd: cwd || undefined,
-    });
+    }, launched.spawnOpts));
     if (agent && listed.status === 0) {
       const body = `${listed.stdout || ''}\n${listed.stderr || ''}`;
       const has = new RegExp(`(^|\\n)\\s*${agent}\\b`, 'i').test(body);

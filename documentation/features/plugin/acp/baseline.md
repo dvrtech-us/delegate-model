@@ -14,6 +14,7 @@
 - A dirty worktree after `--mode read` (compared to the pre-spawn snapshot) is always `read_mode_violated`.
 - Recursion: `DELEGATE_DEPTH` ≥ `DELEGATE_MAX_DEPTH` is `recursion_guard` exit 2 before spawn.
 - Child env sets `DELEGATE_DEPTH` to current+1.
+- The first `--agent` token is resolved with the same `findBinary` PATHEXT / no-cwd rules as the wrapper. A resolved `.cmd`/`.bat` is spawned via ComSpec, never `shell: true`.
 - `--timeout` is measured from spawn, including handshake.
 - The agent process group is SIGTERM/SIGKILL-waited before `emit`.
 - Unnamed router never selects ACP.

@@ -22,10 +22,10 @@ A single Node script that invokes one of four local CLI agents (Grok, Codex, ope
 
 1. **Argument parsing.** `<backend>` must be one of `grok | codex | opencode | claude`. `--mode` and `--cwd` are required; missing either is exit code 2. `--cwd` must be absolute; relative is exit code 2. `opencode` and `claude` additionally require `--model`; missing is exit code 2.
 2. **Recursion guard.** If `Number(process.env.DELEGATE_DEPTH) || 0` is ≥ `DELEGATE_MAX_DEPTH` (default 1), emit `error.class: "recursion_guard"` and exit 2 before any worktree, spawn, or run directory. This fires on dry-run too.
-3. **Preflight.** Locate the backend binary on `PATH` plus known install directories (`~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin`), unless `DELEGATE_NO_EXTRA_BIN_DIRS=1` is set, in which case only `PATH` is searched. Missing binary is exit code 2 with `error.class: "not_installed"`. For opencode, additionally attempt (best effort, short timeout) to confirm the `plan` agent exists and, when `--model` looks like a local provider (`lmstudio/`, `ollama/`), that its base URL is reachable.
+3. **Preflight.** Locate the backend binary on `PATH` plus known install directories (`~/.grok/bin`, `~/.local/bin`, `~/.opencode/bin`, `/usr/local/bin`, `/opt/homebrew/bin`), unless `DELEGATE_NO_EXTRA_BIN_DIRS=1` is set, in which case only `PATH` is searched. On Windows, a name with no extension is tried as `name`+each filtered `PATHEXT` entry (default `.COM;.EXE;.BAT;.CMD`; `.JS`/`.VBS` and other script extensions are dropped); the bare extensionless name is never tried, cwd is never searched, and a leading-dot token like `.codex` is a PATH name (only `./` / `.\` / absolute / separator-containing names are explicit paths). Missing binary is exit code 2 with `error.class: "not_installed"`. For opencode, additionally attempt (best effort, short timeout) to confirm the `plan` agent exists and, when `--model` looks like a local provider (`lmstudio/`, `ollama/`), that its base URL is reachable.
 4. **Worktree setup** (if `--worktree NAME` given). Requires `--cwd` to be a git repo, else exit code 2. Creates or reuses a sibling worktree at `<cwd>-wt-<NAME>` on branch `delegate/<NAME>`. The effective working directory for the backend becomes the worktree path.
 5. **Argv construction.** Backend-specific flags are assembled per the read/write mode table below. The brief is passed on stdin where the backend supports it (Codex only; `usesStdinBrief`), otherwise as a single argv element (Grok, opencode, Claude) — never through a shell.
-6. **Spawn and timeout.** `child_process.spawn` with an argv array (no shell interpolation). The child environment is a copy of `process.env` with `DELEGATE_DEPTH` set to the current depth plus one. Default timeout is `--timeout` or `DELEGATE_TIMEOUT_SECS` or 1800 seconds. On timeout: SIGTERM, wait 5s, then SIGKILL.
+6. **Spawn and timeout.** `child_process.spawn` with an argv array (no shell interpolation; never `shell: true`). On Windows, a resolved `.cmd`/`.bat` is launched as `ComSpec /d /s /c` with `windowsVerbatimArguments` and each token quoted; `.exe`/`.com` are spawned directly. The child environment is a copy of `process.env` with `DELEGATE_DEPTH` set to the current depth plus one. Default timeout is `--timeout` or `DELEGATE_TIMEOUT_SECS` or 1800 seconds. On timeout: SIGTERM, wait 5s, then SIGKILL.
 7. **Output capture.** stdout/stderr interleaved into a run-scoped raw log with stream tags. For grok's `streaming-messages-json` output (and Claude's `stream-json`), `raw.log` now contains full `tool_result` payloads per streamed line (not just the final result), and stdout is accumulated in memory for the duration of the run, so those runs produce a larger `raw.log` and use more memory than under a buffered `json` format. This is an accepted tradeoff for observability: the old format emitted nothing until the process exited, making a long-running call indistinguishable from a hang.
 8. **Parsing**, backend-specific (see below).
 9. **Retry rules**, applied after parsing (see below).
@@ -138,6 +138,7 @@ Known limitation: if the wrapper process itself receives `SIGKILL` (which cannot
 | Path | Role |
 |---|---|
 | `plugins/delegate-model/scripts/delegate.js` | The wrapper itself |
+| `plugins/delegate-model/scripts/lib.js` | Shared primitives: envelope, worktree, recursion, `findBinary` / PATHEXT, `spawnFileArgs`, process-group kill |
 | `plugins/delegate-model/tests/run.sh` | Test harness (bash 3.2 compatible) |
 | `plugins/delegate-model/tests/mocks/{grok,codex,opencode,claude}` | Fake CLI binaries used by tests |
 | `plugins/delegate-model/tests/fixtures/*` | Recorded/synthesized backend outputs used to validate parsing |
@@ -219,7 +220,7 @@ None.
 
 Run with `bash plugins/delegate-model/tests/run.sh` from the repo root. Bash 3.2 compatible; puts `tests/mocks` first on `PATH` so no real backend CLI or network access is required. Prints one `PASS:`/`FAIL:` line per case plus a final `<n> passed, <n> failed` summary, and exits non-zero if anything failed.
 
-66 cases as of 2026-09-13, in run order. Additions beyond the original 23 include grok streaming-parse regressions (F1–F5), `--brief-file` conflict, the claude backend, `DELEGATE_NO_EXTRA_BIN_DIRS`, and `recursion_guard`.
+88 cases as of 2026-09-19, in run order. Additions beyond the original 23 include grok streaming-parse regressions (F1–F5), `--brief-file` conflict, the claude backend, `DELEGATE_NO_EXTRA_BIN_DIRS`, `recursion_guard`, and Windows `findBinary` PATHEXT helpers (simulated on darwin).
 
 | # | Test name |
 |---|---|
@@ -230,6 +231,7 @@ Run with `bash plugins/delegate-model/tests/run.sh` from the repo root. Bash 3.2
 | 4b | usage: claude without --model exits 2 |
 | 5 | not_installed: empty PATH exits 2 (`DELEGATE_NO_EXTRA_BIN_DIRS=1`) |
 | 5b | not_installed: claude empty PATH+no extra dirs exits 2 with hint |
+| — | parsePathext / namesToTry / spawnFileArgs / findBinary PATHEXT cases (win32 simulated on darwin) |
 | 6 | parse: grok fixture text=OK sessionId |
 | 7 | parse: codex fixture text=OK sessionId |
 | 8 | parse: opencode fixture text=OK sessionId (step_finish stop) |
