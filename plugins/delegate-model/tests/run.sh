@@ -163,6 +163,20 @@ else
   fail "usage: claude without --model exits 2" "exit=$EC out=$OUT"
 fi
 
+run_wrap grok --mode write --cwd "$TMPROOT" --max-turns 0 -- "hi"
+if [ "$EC" -eq 2 ] && [ "$(json_field "$OUT" "error.class")" = "usage" ]; then
+  pass "usage: grok --max-turns must be a positive integer"
+else
+  fail "usage: grok --max-turns must be a positive integer" "exit=$EC out=$OUT"
+fi
+
+run_wrap codex --mode write --cwd "$TMPROOT" --max-turns 10 -- "hi"
+if [ "$EC" -eq 2 ] && [ "$(json_field "$OUT" "error.class")" = "usage" ]; then
+  pass "usage: --max-turns is Grok write-only"
+else
+  fail "usage: --max-turns is Grok write-only" "exit=$EC out=$OUT"
+fi
+
 # ---------------------------------------------------------------------------
 # not_installed
 # ---------------------------------------------------------------------------
@@ -689,6 +703,38 @@ if [ "$EC" -eq 0 ]; then
     pass "dry-run: grok argv uses --output-format streaming-messages-json"
   else
     fail "dry-run: grok argv uses --output-format streaming-messages-json" "cmd=$cmd0"
+  fi
+
+  run_wrap grok --mode write --cwd "$PARSE_CWD" --dry-run -- "hi"
+  printf '%s' "$OUT" | "$NODE" -e '
+    const fs = require("fs");
+    const raw = fs.readFileSync(0, "utf8");
+    const j = JSON.parse(raw.slice(raw.indexOf("{")));
+    const cmd = j.command || [];
+    const turns = cmd.indexOf("--max-turns");
+    if (turns < 0 || cmd[turns + 1] !== "120") process.exit(1);
+  '
+  turnflags=$?
+  if [ "$EC" -eq 0 ] && [ "$turnflags" -eq 0 ]; then
+    pass "dry-run: Grok write defaults to 120 turns"
+  else
+    fail "dry-run: Grok write defaults to 120 turns" "exit=$EC out=$OUT"
+  fi
+
+  run_wrap grok --mode write --cwd "$PARSE_CWD" --max-turns 37 --dry-run -- "hi"
+  printf '%s' "$OUT" | "$NODE" -e '
+    const fs = require("fs");
+    const raw = fs.readFileSync(0, "utf8");
+    const j = JSON.parse(raw.slice(raw.indexOf("{")));
+    const cmd = j.command || [];
+    const turns = cmd.indexOf("--max-turns");
+    if (turns < 0 || cmd[turns + 1] !== "37") process.exit(1);
+  '
+  turnflags=$?
+  if [ "$EC" -eq 0 ] && [ "$turnflags" -eq 0 ]; then
+    pass "dry-run: Grok write --max-turns overrides the default"
+  else
+    fail "dry-run: Grok write --max-turns overrides the default" "exit=$EC out=$OUT"
   fi
 else
   fail "dry-run: prints argv, spawns nothing" "exit=$EC out=$OUT"

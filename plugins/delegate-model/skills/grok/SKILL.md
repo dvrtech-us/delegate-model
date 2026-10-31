@@ -25,6 +25,7 @@ Optional flags worth knowing:
 
 | Flag | Meaning |
 |---|---|
+| `--max-turns N` | Overrides the write-mode turn limit (default: 120). |
 | `--timeout SECS` | Overrides the default (1800s, or `DELEGATE_TIMEOUT_SECS`). |
 | `--brief-file PATH` | Read the brief from a file instead of trailing argv words, for long briefs. Supplying both `--brief-file` and a trailing brief is a usage error (exit 2) — the wrapper never silently picks one and drops the other. |
 | `--extra-args "…"` | Escape hatch, appended verbatim to Grok's argv after the wrapper's own flags. |

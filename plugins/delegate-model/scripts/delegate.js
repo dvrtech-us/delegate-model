@@ -51,13 +51,14 @@ const {
 lib.setUsageText(() =>
   [
     'Usage: delegate.js <grok|codex|opencode|claude> --mode read|write --cwd /abs [options] [-- brief]',
-    'Options: --model ID --session ID --worktree [NAME] --timeout SECS --brief-file PATH',
+    'Options: --model ID --session ID --worktree [NAME] --timeout SECS --max-turns N --brief-file PATH',
     '         --extra-args "…" --dry-run --run-dir PATH',
   ].join('\n')
 );
 
 const BACKENDS = new Set(['grok', 'codex', 'opencode', 'claude']);
 const CLAUDE_WRITE_BUDGET_USD = '5';
+const GROK_DEFAULT_MAX_TURNS = '120';
 const INSTALL_HINT = {
   grok: 'Install the grok CLI and ensure it is on PATH (https://x.ai).',
   codex: 'Install the Codex CLI: https://github.com/openai/codex',
@@ -135,6 +136,7 @@ function parseCli(argv) {
     worktreeRequested: false,
     worktreeName: null,
     timeout: null,
+    maxTurns: null,
     briefFile: null,
     extraArgsRaw: '',
     dryRun: false,
@@ -197,6 +199,7 @@ function parseCli(argv) {
       '--model': 'model',
       '--session': 'session',
       '--timeout': 'timeout',
+      '--max-turns': 'maxTurns',
       '--brief-file': 'briefFile',
       '--extra-args': 'extraArgsRaw',
       '--run-dir': 'runDir',
@@ -210,6 +213,10 @@ function parseCli(argv) {
         const n = Number(got.value);
         if (!Number.isFinite(n) || n <= 0) failUsage('--timeout must be a positive number of seconds', { backend: opts.backend });
         opts.timeout = n;
+      } else if (field === 'maxTurns') {
+        const n = Number(got.value);
+        if (!Number.isInteger(n) || n <= 0) failUsage('--max-turns must be a positive integer', { backend: opts.backend });
+        opts.maxTurns = String(n);
       } else {
         opts[field] = got.value;
       }
@@ -245,6 +252,9 @@ function parseCli(argv) {
   }
   if (opts.backend === 'claude' && !opts.model) {
     failUsage('claude requires --model (e.g. sonnet, opus, haiku)', { backend: opts.backend, mode: opts.mode, cwd: opts.cwd });
+  }
+  if (opts.maxTurns != null && (opts.backend !== 'grok' || opts.mode !== 'write')) {
+    failUsage('--max-turns is only supported for grok write mode', { backend: opts.backend, mode: opts.mode, cwd: opts.cwd });
   }
   if (opts.worktreeRequested) {
     if (!opts.worktreeName || /[\\/]/.test(opts.worktreeName) || opts.worktreeName === '..') {
@@ -454,7 +464,7 @@ async function preflightOpencode({ bin, cwd, mode, model, timeoutMs }) {
 // grok adapter
 // ---------------------------------------------------------------------------
 
-function grokBuildArgs({ brief, cwd, mode, model, session, extraArgs }) {
+function grokBuildArgs({ brief, cwd, mode, model, session, maxTurns, extraArgs }) {
   const args = ['-p', brief];
   if (mode === 'read') {
     // mcp__* is Claude-compat MCP deny-all; grok --help aliases --deny to --disallowedTools
@@ -473,7 +483,7 @@ function grokBuildArgs({ brief, cwd, mode, model, session, extraArgs }) {
       '--no-subagents'
     );
   } else {
-    args.push('--always-approve', '--max-turns', '120');
+    args.push('--always-approve', '--max-turns', maxTurns || GROK_DEFAULT_MAX_TURNS);
   }
   args.push('--cwd', cwd, '--output-format', 'streaming-messages-json');
   if (model) args.push('-m', model);
@@ -952,6 +962,7 @@ async function main() {
     mode: opts.mode,
     model: opts.model,
     session: opts.session,
+    maxTurns: opts.maxTurns,
     extraArgs,
     lastTxtPath,
   };

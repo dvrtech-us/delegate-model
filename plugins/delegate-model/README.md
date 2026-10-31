@@ -82,6 +82,8 @@ Say things like:
 
 The host calls `delegate.js` or `acp.js` directly. You will not usually see the raw command, but you can ask for it, or ask for `--dry-run` to see the exact argv without running anything.
 
+Grok write calls default to 120 turns; override this with `--max-turns N` when needed. This option is supported only with `grok --mode write`.
+
 Skills are `SKILL.md` files that use `${CLAUDE_PLUGIN_ROOT}`. That variable is set by Claude Code plugin install, and by Codex when it installs a plugin (compatibility env). A raw copy into `~/.codex/skills` does not set it.
 
 Driving Codex *over ACP* (`--agent` at a `codex-acp` binary) is a separate, unsmoked path. Prefer `delegate.js codex` to reach Codex as a peer.
